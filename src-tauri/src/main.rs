@@ -1344,9 +1344,12 @@ fn terminate_process_tree(pid: u32) {
 fn main() {
     #[cfg(target_os = "linux")]
     {
-        // Work around WebKitGTK crashes on some Mesa/Wayland/DMABUF combinations.
-        // Setting it here makes packaged deb/rpm launches behave like `npm run dev`.
+        // Work around WebKitGTK crashes or black windows on some Mesa/Wayland/DMABUF
+        // combinations. Setting these here makes packaged deb/rpm launches behave
+        // consistently without relying on a shell wrapper.
+        env::set_var("GDK_BACKEND", env::var("GDK_BACKEND").unwrap_or_else(|_| "x11".to_string()));
         env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+        env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
     }
 
     tauri::Builder::default()
