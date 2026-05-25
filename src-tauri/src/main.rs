@@ -1247,14 +1247,19 @@ fn adb_path() -> String {
 }
 
 fn resolve_auto_root(value: Option<String>) -> Result<PathBuf, String> {
-    let value = value
+    let configured = value
         .filter(|item| !item.trim().is_empty())
         .unwrap_or(default_auto_root()?);
-    let root = PathBuf::from(value);
+    let root = PathBuf::from(&configured);
     if root.is_dir() {
         Ok(root)
     } else {
-        Err(format!("AUTO root does not exist: {}", root.display()))
+        let fallback = PathBuf::from(default_auto_root()?);
+        if fallback.is_dir() {
+            Ok(fallback)
+        } else {
+            Err(format!("AUTO root does not exist: {}", root.display()))
+        }
     }
 }
 

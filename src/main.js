@@ -272,7 +272,7 @@ init();
 
 async function init() {
   render();
-  await loadDefaultRoot(false);
+  await reconcileAutoRoot();
   await refreshDevices();
 }
 
@@ -285,6 +285,20 @@ async function loadDefaultRoot(overwrite = true) {
     if (els.autoRootInput) els.autoRootInput.value = root;
   } catch (error) {
     appendLog(`[settings] Default root failed: ${error}`);
+  }
+}
+
+async function reconcileAutoRoot() {
+  try {
+    const root = await invoke("default_auto_root");
+    if (!state.autoRoot || state.autoRoot !== root) {
+      if (state.autoRoot) appendLog(`[settings] AUTO root updated: ${state.autoRoot} -> ${root}`);
+      state.autoRoot = root;
+      localStorage.setItem("autoRoot", root);
+    }
+    if (els.autoRootInput) els.autoRootInput.value = state.autoRoot;
+  } catch (error) {
+    appendLog(`[settings] Root reconcile failed: ${error}`);
   }
 }
 
@@ -486,7 +500,7 @@ async function runSelected() {
   try {
     await invoke("run_suite", {
       request: {
-        auto_root: state.autoRoot,
+            auto_root: state.autoRoot || await invoke("default_auto_root"),
         test_type: state.selectedMode,
         user_devices: userDevices,
         userdebug_devices: userdebugDevices,

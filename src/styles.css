@@ -424,7 +424,8 @@ h2 {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 16px 6px;
+  min-height: 50px;
+  padding: 9px 16px 8px;
 }
 
 .log-head button {
@@ -442,11 +443,29 @@ h2 {
   flex: 1;
   min-width: 0;
   overflow-x: auto;
+  overflow-y: hidden;
+  min-height: 34px;
+  padding-bottom: 4px;
+  scrollbar-width: thin;
+  scrollbar-color: #394141 transparent;
+}
+
+.log-tabs::-webkit-scrollbar {
+  height: 4px;
+}
+
+.log-tabs::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.log-tabs::-webkit-scrollbar-thumb {
+  background: #394141;
+  border-radius: 999px;
 }
 
 .log-tab {
   max-width: 220px;
-  height: 22px;
+  height: 30px;
   flex: 0 0 auto;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -455,7 +474,7 @@ h2 {
   border-radius: 4px;
   background: #111212;
   color: var(--muted);
-  padding: 0 8px;
+  padding: 0 10px;
   font-size: 10px;
   font-weight: 800;
 }
