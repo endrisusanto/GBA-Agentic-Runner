@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+
+# Frontend build output
+dist/
+
+# Rust/Tauri build output
+target/
+src-tauri/target/
+src-tauri/gen/
+
+# Tauri generated bundles
+src-tauri/target/release/bundle/
+
+# Local runtime state
+.gba-agentic-latest-result
+*.log
+
+# Android suite payloads and generated test results
+CTS/
+GTS/
+STS/
+Results/
+KEY/
+
+# Large downloaded archives
+*.zip
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Environment files
+.env
+.env.*
+!.env.example
