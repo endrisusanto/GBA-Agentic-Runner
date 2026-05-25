@@ -57,6 +57,7 @@ const state = {
   running: false,
   logTabs: new Map(),
   activeLogTab: "",
+  activeRunLogKeys: new Set(),
   suiteStatuses: new Map(),
   summaries: new Map(),
   resultDir: "",
@@ -216,8 +217,7 @@ els.wifiInput.checked = state.wifi.enabled;
 
 els.refreshBtn.addEventListener("click", refreshDevices);
 els.clearLogBtn.addEventListener("click", () => {
-  const tab = state.logTabs.get(state.activeLogTab);
-  if (tab) tab.lines = [];
+  clearInactiveLogTabs();
   renderLog();
 });
 els.unselectBtn.addEventListener("click", toggleAllReadyDevices);
@@ -266,6 +266,7 @@ listen("gba-run-finished", (event) => {
   els.statusLine.textContent = payload.exit_code === 0 ? "Completed" : "Finished with issue";
   appendLog(`[runner] Finished exit=${payload.exit_code} result=${state.resultDir || "N/A"}`);
   renderMetrics();
+  refreshDevices();
 });
 
 init();
@@ -307,7 +308,7 @@ async function refreshDevices() {
   els.deviceFooter.textContent = "Scanning";
   try {
     state.devices = await invoke("list_devices");
-    const ready = new Set(state.devices.filter((d) => d.state === "device").map((d) => d.serial));
+    const ready = new Set(state.devices.filter((d) => d.state === "device" && !d.busy).map((d) => d.serial));
     state.selected = new Set([...state.selected].filter((serial) => ready.has(serial)));
     appendLog(`[adb] Found ${state.devices.length} device(s).`);
   } catch (error) {
@@ -327,7 +328,7 @@ function render() {
 }
 
 function renderDevices() {
-  const readyDevices = state.devices.filter((device) => device.state === "device");
+  const readyDevices = state.devices.filter((device) => device.state === "device" && !device.busy);
   els.unselectBtn.textContent = state.selected.size === readyDevices.length && readyDevices.length ? "Unselect" : "Select";
 
   if (!state.devices.length) {
@@ -336,18 +337,18 @@ function renderDevices() {
   }
 
   els.deviceList.innerHTML = state.devices.map((device) => {
-    const ready = device.state === "device";
+    const ready = device.state === "device" && !device.busy;
     const selected = state.selected.has(device.serial);
-    const badge = device.is_userdebug ? "USERDEBUG" : "USER";
+    const badge = device.busy ? "BUSY" : (device.is_userdebug ? "USERDEBUG" : "USER");
     return `
-      <button class="device-card ${selected ? "selected" : ""} ${ready ? "" : "disabled"}" data-serial="${escapeHtml(device.serial)}" ${ready ? "" : "disabled"}>
+      <button class="device-card ${selected ? "selected" : ""} ${ready ? "" : "disabled"} ${device.busy ? "busy" : ""}" data-serial="${escapeHtml(device.serial)}" ${ready ? "" : "disabled"}>
         <div class="device-top">
           <span class="check-dot ${selected ? "checked" : ""}">${selected ? "✓" : ""}</span>
           <div>
             <strong>${escapeHtml(device.model || device.serial)}</strong>
-            <p><b>${escapeHtml(device.serial)}</b> <span>${escapeHtml(device.state)}</span></p>
+            <p><b>${escapeHtml(device.serial)}</b> <span>${escapeHtml(device.busy ? device.busy_reason : device.state)}</span></p>
           </div>
-          <span class="type-pill ${device.is_userdebug ? "debug" : ""}">${badge}</span>
+          <span class="type-pill ${device.busy ? "busy" : (device.is_userdebug ? "debug" : "")}">${badge}</span>
         </div>
         <div class="device-meta">
           <span><small>ANDROID</small>${escapeHtml(device.android || "-")}</span>
@@ -463,7 +464,7 @@ function renderMetrics() {
 }
 
 function toggleAllReadyDevices() {
-  const ready = state.devices.filter((device) => device.state === "device").map((device) => device.serial);
+  const ready = state.devices.filter((device) => device.state === "device" && !device.busy).map((device) => device.serial);
   if (ready.length && state.selected.size === ready.length) state.selected.clear();
   else state.selected = new Set(ready);
   render();
@@ -487,6 +488,7 @@ async function runSelected() {
   state.summaries.clear();
   state.resultDir = "";
   state.runStartedAt = Date.now();
+  state.activeRunLogKeys.clear();
   createRunLogTabs(selectedDevices);
   els.runBtn.disabled = true;
   els.cancelBtn.disabled = false;
@@ -517,6 +519,7 @@ async function runSelected() {
     els.cancelBtn.disabled = true;
     els.statusLine.textContent = "Run failed";
     appendLog(`[runner] Run failed: ${error}`);
+    await refreshDevices();
   }
 }
 
@@ -526,6 +529,7 @@ async function cancelRun() {
   els.statusLine.textContent = "Cancelling";
   try {
     await invoke("cancel_run");
+    await refreshDevices();
   } catch (error) {
     appendLog(`[runner] Cancel failed: ${error}`);
     els.cancelBtn.disabled = false;
@@ -594,6 +598,8 @@ function saveInlineSettings() {
 
 function validateRun(mode, userDevices, userdebugDevices) {
   if (!mode) return "No test mode selected.";
+  const busySelected = state.devices.filter((device) => state.selected.has(device.serial) && device.busy);
+  if (busySelected.length) return `Device busy: ${busySelected.map((device) => device.serial).join(", ")}`;
   if (mode.needs === "user" && userDevices.length === 0) return `${mode.name} needs at least one non-userdebug device.`;
   if (mode.needs === "userdebug" && userdebugDevices.length === 0) return `${mode.name} needs at least one userdebug device.`;
   if (mode.needs === "both" && (userDevices.length === 0 || userdebugDevices.length === 0)) return "SMR needs non-userdebug and userdebug devices.";
@@ -616,17 +622,29 @@ function createRunLogTabs(devices) {
   const primary = devices[0] || {};
   const deviceTitle = `${primary.serial || "NO_SERIAL"} ${primary.pda || "NO_PDA"} ${primary.model || "NO_MODEL"}`;
   const runnerKey = ensureLogTab(`runner:${stamp}`, "Runner", `${state.selectedMode} ${deviceTitle}`);
+  state.activeRunLogKeys.add(runnerKey);
   const mode = TEST_MODES.find((item) => item.id === state.selectedMode);
   if (mode?.needs === "user" || mode?.needs === "both") {
-    ensureLogTab(`cts:${stamp}`, "CTS", deviceTitle);
-    ensureLogTab(`gts:${stamp}`, "GTS", deviceTitle);
+    state.activeRunLogKeys.add(ensureLogTab(`cts:${stamp}`, "CTS", deviceTitle));
+    state.activeRunLogKeys.add(ensureLogTab(`gts:${stamp}`, "GTS", deviceTitle));
   }
   if (mode?.needs === "userdebug" || mode?.needs === "both") {
     const debugDevice = devices.find((device) => device.is_userdebug) || primary;
     const debugTitle = `${debugDevice.serial || "NO_SERIAL"} ${debugDevice.pda || "NO_PDA"} ${debugDevice.model || "NO_MODEL"}`;
-    ensureLogTab(`sts:${stamp}`, "STS", debugTitle);
+    state.activeRunLogKeys.add(ensureLogTab(`sts:${stamp}`, "STS", debugTitle));
   }
   state.activeLogTab = runnerKey;
+}
+
+function clearInactiveLogTabs() {
+  const keep = new Set(state.activeRunLogKeys);
+  if (!keep.size && state.activeLogTab) keep.add(state.activeLogTab);
+  for (const key of [...state.logTabs.keys()]) {
+    if (!keep.has(key)) state.logTabs.delete(key);
+  }
+  if (!state.logTabs.has(state.activeLogTab)) {
+    state.activeLogTab = [...state.logTabs.keys()][0] || "";
+  }
 }
 
 function ensureLogTab(key, kind, title) {

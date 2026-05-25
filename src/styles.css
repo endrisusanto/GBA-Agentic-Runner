@@ -290,6 +290,17 @@ h2 {
   background: #171508;
 }
 
+.device-card.busy {
+  opacity: 0.72;
+  border-color: #5c5014;
+}
+
+.type-pill.busy {
+  border-color: #7a6416;
+  color: var(--yellow);
+  background: #211b08;
+}
+
 .device-meta {
   display: grid;
   grid-template-columns: repeat(3, 1fr);

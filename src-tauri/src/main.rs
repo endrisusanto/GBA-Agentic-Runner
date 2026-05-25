@@ -31,6 +31,8 @@ struct DeviceInfo {
     cp: String,
     csc: String,
     ip: String,
+    busy: bool,
+    busy_reason: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -72,6 +74,21 @@ struct RunFinished {
     result_dir: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct BusyRegistry {
+    devices: HashMap<String, BusyDevice>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BusyDevice {
+    serial: String,
+    test_type: String,
+    model: String,
+    pda: String,
+    run_id: String,
+    started_at: String,
+}
+
 #[derive(Default)]
 struct RunState {
     active: Mutex<ActiveRun>,
@@ -81,6 +98,8 @@ struct RunState {
 struct ActiveRun {
     running: bool,
     pids: Vec<u32>,
+    root: Option<PathBuf>,
+    busy_serials: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -128,6 +147,8 @@ fn preflight(auto_root: Option<String>) -> Result<Vec<String>, String> {
 
 #[tauri::command]
 fn list_devices() -> Result<Vec<DeviceInfo>, String> {
+    let root = resolve_auto_root(None)?;
+    let busy = read_busy_registry(&root);
     let output = run_output(Command::new(adb_path()).args(["devices", "-l"]))?;
     let mut devices = Vec::new();
 
@@ -156,6 +177,7 @@ fn list_devices() -> Result<Vec<DeviceInfo>, String> {
             String::new()
         };
 
+        let busy_entry = busy.devices.get(&serial);
         devices.push(DeviceInfo {
             serial: serial.clone(),
             state,
@@ -172,6 +194,10 @@ fn list_devices() -> Result<Vec<DeviceInfo>, String> {
             cp: first_non_empty(&[prop(&props, "ril.sw_ver"), prop(&props, "gsm.version.baseband")]),
             csc: prop(&props, "ril.official_cscver"),
             ip,
+            busy: busy_entry.is_some(),
+            busy_reason: busy_entry
+                .map(|entry| format!("{} {}", entry.test_type, entry.started_at))
+                .unwrap_or_default(),
         });
     }
 
@@ -196,11 +222,25 @@ fn run_suite(
         if active.running {
             return Err("A run is already active".to_string());
         }
+        let selected = selected_serials(&request);
+        let busy = read_busy_registry(&root);
+        let busy_selected = selected
+            .iter()
+            .filter(|serial| busy.devices.contains_key(serial.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !busy_selected.is_empty() {
+            return Err(format!("Device busy: {}", busy_selected.join(", ")));
+        }
+        mark_busy_devices(&root, &request, &selected)?;
         active.running = true;
         active.pids.clear();
+        active.root = Some(root.clone());
+        active.busy_serials = selected;
     }
 
     thread::spawn(move || {
+        let busy_serials = selected_serials(&request);
         let result = run_suite_blocking(app.clone(), root, request.clone());
         let exit_code = match result {
             Ok(code) => code,
@@ -213,7 +253,13 @@ fn run_suite(
         if let Ok(mut active) = app.state::<RunState>().active.lock() {
             active.running = false;
             active.pids.clear();
+            active.root = None;
+            active.busy_serials.clear();
         }
+        clear_busy_devices(
+            &resolve_auto_root(Some(request.auto_root.clone())).unwrap_or_else(|_| PathBuf::from(&request.auto_root)),
+            &busy_serials,
+        );
 
         let result_dir = latest_result_dir_hint(&request.auto_root);
         let _ = app.emit(
@@ -244,8 +290,13 @@ fn cancel_run(app: AppHandle, run_state: State<'_, RunState>) -> Result<(), Stri
         terminate_process_tree(pid);
     }
     if let Ok(mut active) = run_state.active.lock() {
+        if let Some(root) = active.root.clone() {
+            clear_busy_devices(&root, &active.busy_serials);
+        }
         active.running = false;
         active.pids.clear();
+        active.root = None;
+        active.busy_serials.clear();
     }
     let _ = app.emit(
         "gba-suite-status",
@@ -996,6 +1047,68 @@ fn validate_request(request: &RunSuiteRequest) -> Result<(), String> {
         }
         _ => Ok(()),
     }
+}
+
+fn selected_serials(request: &RunSuiteRequest) -> Vec<String> {
+    request
+        .user_devices
+        .iter()
+        .chain(request.userdebug_devices.iter())
+        .cloned()
+        .collect()
+}
+
+fn busy_registry_path(root: &Path) -> PathBuf {
+    root.join("busy.json")
+}
+
+fn read_busy_registry(root: &Path) -> BusyRegistry {
+    let path = busy_registry_path(root);
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|text| serde_json::from_str::<BusyRegistry>(&text).ok())
+        .unwrap_or_default()
+}
+
+fn write_busy_registry(root: &Path, registry: &BusyRegistry) -> Result<(), String> {
+    let path = busy_registry_path(root);
+    let text = serde_json::to_string_pretty(registry).map_err(|err| err.to_string())?;
+    fs::write(&path, text).map_err(|err| format!("Cannot write {}: {err}", path.display()))
+}
+
+fn mark_busy_devices(root: &Path, request: &RunSuiteRequest, serials: &[String]) -> Result<(), String> {
+    let mut registry = read_busy_registry(root);
+    let run_id = format!("{}_{}", sanitize_name(&request.test_type), timestamp_compact());
+    let started_at = timestamp_compact();
+    for serial in serials {
+        let props = device_props(serial).unwrap_or_default();
+        registry.devices.insert(
+            serial.clone(),
+            BusyDevice {
+                serial: serial.clone(),
+                test_type: request.test_type.clone(),
+                model: first_non_empty(&[
+                    prop(&props, "ro.product.model"),
+                    "UNKNOWN".to_string(),
+                ]),
+                pda: first_non_empty(&[prop(&props, "ro.build.PDA"), "UNKNOWN".to_string()]),
+                run_id: run_id.clone(),
+                started_at: started_at.clone(),
+            },
+        );
+    }
+    write_busy_registry(root, &registry)
+}
+
+fn clear_busy_devices(root: &Path, serials: &[String]) {
+    if serials.is_empty() {
+        return;
+    }
+    let mut registry = read_busy_registry(root);
+    for serial in serials {
+        registry.devices.remove(serial);
+    }
+    let _ = write_busy_registry(root, &registry);
 }
 
 fn retry_args(count: u32) -> String {
