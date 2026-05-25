@@ -579,7 +579,7 @@ fn run_suite_process(
     suite: &str,
     devices: &[String],
     executable: &Path,
-    cwd: &Path,
+    _cwd: &Path,
     suite_command: &str,
     via_pipe: bool,
     log_file: &Path,
@@ -590,8 +590,19 @@ fn run_suite_process(
     emit_log(app, format!("[{suite}] {suite_command}"));
     write_log_header(log_file, suite, suite_command)?;
 
-    let mut command = Command::new(executable);
-    command.current_dir(cwd).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let executable_name = executable
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("Invalid executable path: {}", executable.display()))?;
+    let executable_dir = executable
+        .parent()
+        .ok_or_else(|| format!("Invalid executable parent: {}", executable.display()))?;
+
+    let mut command = Command::new(format!("./{executable_name}"));
+    command
+        .current_dir(executable_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
     if via_pipe {
         command.stdin(Stdio::piped());
     } else {

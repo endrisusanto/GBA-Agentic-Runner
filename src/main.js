@@ -55,7 +55,8 @@ const state = {
   selected: new Set(),
   selectedMode: "Cuci SMR",
   running: false,
-  logLines: [],
+  logTabs: new Map(),
+  activeLogTab: "",
   suiteStatuses: new Map(),
   summaries: new Map(),
   resultDir: "",
@@ -110,6 +111,7 @@ app.innerHTML = `
       <section class="running-log">
         <div class="log-head">
           <h2>RUNNING LOG</h2>
+          <div class="log-tabs" id="logTabs"></div>
           <button id="clearLogBtn">[ Clear Log ]</button>
         </div>
         <pre id="logBox"></pre>
@@ -175,6 +177,7 @@ const els = {
   deviceList: document.querySelector("#deviceList"),
   testArea: document.querySelector("#testArea"),
   logBox: document.querySelector("#logBox"),
+  logTabs: document.querySelector("#logTabs"),
   runBtn: document.querySelector("#runBtn"),
   cancelBtn: document.querySelector("#cancelBtn"),
   openResultBtn: document.querySelector("#openResultBtn"),
@@ -213,7 +216,8 @@ els.wifiInput.checked = state.wifi.enabled;
 
 els.refreshBtn.addEventListener("click", refreshDevices);
 els.clearLogBtn.addEventListener("click", () => {
-  state.logLines = [];
+  const tab = state.logTabs.get(state.activeLogTab);
+  if (tab) tab.lines = [];
   renderLog();
 });
 els.unselectBtn.addEventListener("click", toggleAllReadyDevices);
@@ -383,8 +387,27 @@ function renderTestArea() {
 }
 
 function renderLog() {
-  els.logBox.textContent = state.logLines.slice(-600).join("\n");
+  renderLogTabs();
+  const tab = state.logTabs.get(state.activeLogTab);
+  els.logBox.textContent = (tab?.lines || []).slice(-600).join("\n");
   els.logBox.scrollTop = els.logBox.scrollHeight;
+}
+
+function renderLogTabs() {
+  if (!state.logTabs.size) {
+    ensureLogTab("runner:boot", "Runner", "Boot");
+  }
+  els.logTabs.innerHTML = [...state.logTabs.values()].map((tab) => `
+    <button class="log-tab ${tab.key === state.activeLogTab ? "active" : ""}" data-key="${escapeHtml(tab.key)}" title="${escapeHtml(tab.title)}">
+      ${escapeHtml(tab.title)}
+    </button>
+  `).join("");
+  els.logTabs.querySelectorAll(".log-tab").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.activeLogTab = button.dataset.key;
+      renderLog();
+    });
+  });
 }
 
 function renderSuiteStatus() {
@@ -446,11 +469,11 @@ async function runSelected() {
   }
 
   state.running = true;
-  state.logLines = [];
   state.suiteStatuses.clear();
   state.summaries.clear();
   state.resultDir = "";
   state.runStartedAt = Date.now();
+  createRunLogTabs(selectedDevices);
   els.runBtn.disabled = true;
   els.cancelBtn.disabled = false;
   els.openResultBtn.disabled = true;
@@ -567,8 +590,52 @@ function validateRun(mode, userDevices, userdebugDevices) {
 function appendLog(line) {
   const text = redact(String(line || ""));
   const stamp = new Date().toLocaleTimeString("en-GB", { hour12: false });
-  state.logLines.push(`${stamp} ${text}`);
+  const kind = logKind(text);
+  const key = latestLogTabKey(kind) || ensureLogTab(`runner:${Date.now()}`, "Runner", "General");
+  const tab = state.logTabs.get(key);
+  tab.lines.push(`${stamp} ${text}`);
   renderLog();
+}
+
+function createRunLogTabs(devices) {
+  const stamp = Date.now();
+  const primary = devices[0] || {};
+  const deviceTitle = `${primary.serial || "NO_SERIAL"} ${primary.pda || "NO_PDA"} ${primary.model || "NO_MODEL"}`;
+  const runnerKey = ensureLogTab(`runner:${stamp}`, "Runner", `${state.selectedMode} ${deviceTitle}`);
+  const mode = TEST_MODES.find((item) => item.id === state.selectedMode);
+  if (mode?.needs === "user" || mode?.needs === "both") {
+    ensureLogTab(`cts:${stamp}`, "CTS", deviceTitle);
+    ensureLogTab(`gts:${stamp}`, "GTS", deviceTitle);
+  }
+  if (mode?.needs === "userdebug" || mode?.needs === "both") {
+    const debugDevice = devices.find((device) => device.is_userdebug) || primary;
+    const debugTitle = `${debugDevice.serial || "NO_SERIAL"} ${debugDevice.pda || "NO_PDA"} ${debugDevice.model || "NO_MODEL"}`;
+    ensureLogTab(`sts:${stamp}`, "STS", debugTitle);
+  }
+  state.activeLogTab = runnerKey;
+}
+
+function ensureLogTab(key, kind, title) {
+  if (!state.logTabs.has(key)) {
+    state.logTabs.set(key, { key, kind, title: `${kind} | ${title}`, lines: [] });
+  }
+  if (!state.activeLogTab) state.activeLogTab = key;
+  return key;
+}
+
+function latestLogTabKey(kind) {
+  const normalized = kind.toLowerCase();
+  const matches = [...state.logTabs.values()].filter((tab) => tab.kind.toLowerCase() === normalized);
+  return matches.length ? matches[matches.length - 1].key : "";
+}
+
+function logKind(text) {
+  const match = text.match(/^\[([^\]]+)\]/);
+  const prefix = match ? match[1].toLowerCase() : "";
+  if (prefix === "cts") return "CTS";
+  if (prefix === "gts") return "GTS";
+  if (prefix === "sts") return "STS";
+  return "Runner";
 }
 
 function requirementText(mode) {
