@@ -54,23 +54,23 @@ src-tauri/target/release/bundle/
 
 Script release akan membaca tag semver terakhir, menaikkan versi, update versi di `package.json`, `package-lock.json`, `src-tauri/Cargo.toml`, dan `src-tauri/tauri.conf.json`, lalu membuat commit dan annotated tag.
 
-Patch release lokal:
+Patch release dan langsung push tag ke GitHub:
 
 ```bash
-./scripts/release-next.sh patch
+./release-next.sh patch
 ```
 
 Minor atau major:
 
 ```bash
-./scripts/release-next.sh minor
-./scripts/release-next.sh major
+./release-next.sh minor
+./release-next.sh major
 ```
 
-Buat commit/tag lalu langsung push:
+Buat commit/tag lokal saja tanpa trigger GitHub Actions:
 
 ```bash
-./scripts/release-next.sh patch --push
+./release-next.sh patch --no-push
 ```
 
 Saat tag `vX.Y.Z` dipush ke GitHub, workflow `.github/workflows/release.yml` otomatis build `.deb` dan `.rpm`, lalu upload ke GitHub Release.

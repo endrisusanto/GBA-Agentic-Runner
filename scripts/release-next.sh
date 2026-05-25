@@ -5,18 +5,20 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
 BUMP="patch"
-PUSH=false
+PUSH=true
 
 for arg in "$@"; do
   case "$arg" in
     major|minor|patch) BUMP="$arg" ;;
     --push) PUSH=true ;;
+    --no-push) PUSH=false ;;
     -h|--help)
       cat <<'HELP'
-Usage: scripts/release-next.sh [patch|minor|major] [--push]
+Usage: scripts/release-next.sh [patch|minor|major] [--push|--no-push]
 
 Creates a release commit and annotated semver tag.
-Default bump is patch. Pushes to origin only when --push is passed.
+Default bump is patch. Pushes branch and tag to origin by default.
+Use --no-push to create the release commit/tag locally only.
 HELP
       exit 0
       ;;
@@ -89,6 +91,7 @@ git add \
   agentic.png \
   auto.sh \
   build-linux.sh \
+  release-next.sh \
   package.json \
   package-lock.json \
   index.html \
