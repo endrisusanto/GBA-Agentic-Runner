@@ -1331,6 +1331,13 @@ fn terminate_process_tree(pid: u32) {
 }
 
 fn main() {
+    #[cfg(target_os = "linux")]
+    {
+        // Work around WebKitGTK crashes on some Mesa/Wayland/DMABUF combinations.
+        // Setting it here makes packaged deb/rpm launches behave like `npm run dev`.
+        env::set_var("WEBKIT_DISABLE_DMABUF_RENDERER", "1");
+    }
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(RunState::default())

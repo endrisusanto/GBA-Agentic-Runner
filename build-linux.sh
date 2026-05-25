@@ -24,8 +24,11 @@ fi
 echo "[build] Checking Rust backend"
 cargo check --manifest-path src-tauri/Cargo.toml
 
+echo "[build] Cleaning old Linux bundle artifacts"
+rm -rf src-tauri/target/release/bundle/deb src-tauri/target/release/bundle/rpm
+
 echo "[build] Building deb/rpm bundles"
 npm run build:linux
 
 echo "[build] Artifacts:"
-find src-tauri/target/release/bundle -type f \( -name '*.deb' -o -name '*.rpm' \) -print
+find src-tauri/target/release/bundle -type f \( -name '*.deb' -o -name '*.rpm' \) -print | sort
