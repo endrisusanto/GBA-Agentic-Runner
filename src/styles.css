@@ -254,10 +254,6 @@ h2 {
   box-shadow: none;
 }
 
-.device-card.busy .check-dot {
-  visibility: hidden;
-}
-
 .device-card.busy .device-actions,
 .device-card.busy .device-inline-actions,
 .device-card.busy .device-meta,
@@ -533,15 +529,41 @@ h2 {
 }
 
 .flow-map {
-  flex: 0 0 auto;
-  min-height: 116px;
-  max-height: 230px;
+  flex: 0 0 220px;
+  height: 220px;
+  min-height: 96px;
+  max-height: 48vh;
   padding: 10px 12px;
-  border-bottom: 1px solid var(--line-soft);
   background: #080909;
   overflow: auto;
   scrollbar-width: thin;
   scrollbar-color: #394141 transparent;
+}
+
+.flow-resizer {
+  flex: 0 0 10px;
+  position: relative;
+  border-top: 1px solid var(--line-soft);
+  border-bottom: 1px solid var(--line-soft);
+  background: #090a0a;
+  cursor: row-resize;
+}
+
+.flow-resizer::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 80px;
+  height: 2px;
+  border-top: 1px solid #343a3a;
+  border-bottom: 1px solid #222828;
+  transform: translate(-50%, -50%);
+}
+
+body.resizing-flow {
+  cursor: row-resize;
+  user-select: none;
 }
 
 .laundry-table-empty {
@@ -744,14 +766,12 @@ h2 {
 }
 
 .running-log {
-  flex: 0 0 auto;
-  height: 300px;
+  flex: 1 1 auto;
+  height: auto;
   display: flex;
   flex-direction: column;
   background: #030303;
-  min-height: 150px;
-  max-height: 58vh;
-  resize: vertical;
+  min-height: 180px;
   overflow: hidden;
 }
 

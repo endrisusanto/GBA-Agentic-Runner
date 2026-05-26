@@ -133,6 +133,7 @@ app.innerHTML = `
       <section class="test-area" id="testArea"></section>
 
       <section class="flow-map" id="flowMap"></section>
+      <div class="flow-resizer" id="flowResizer" title="Resize testcase table"></div>
 
       <section class="running-log">
         <div class="log-head">
@@ -207,6 +208,7 @@ const els = {
   deviceList: document.querySelector("#deviceList"),
   testArea: document.querySelector("#testArea"),
   flowMap: document.querySelector("#flowMap"),
+  flowResizer: document.querySelector("#flowResizer"),
   logBox: document.querySelector("#logBox"),
   logFlowTabs: document.querySelector("#logFlowTabs"),
   logSubtabs: document.querySelector("#logSubtabs"),
@@ -267,6 +269,7 @@ els.runBtn.addEventListener("click", runSelected);
 els.cancelBtn.addEventListener("click", cancelRun);
 els.openResultBtn.addEventListener("click", openResult);
 els.resultPill.addEventListener("click", openResult);
+els.flowResizer.addEventListener("pointerdown", startFlowResize);
 els.retryInput.addEventListener("change", saveInlineSettings);
 els.timeoutInput.addEventListener("change", saveInlineSettings);
 els.wifiInput.addEventListener("change", () => {
@@ -522,6 +525,33 @@ function renderLogTabs() {
       renderLog();
     });
   });
+}
+
+function startFlowResize(event) {
+  event.preventDefault();
+  const startY = event.clientY;
+  const startHeight = els.flowMap.getBoundingClientRect().height;
+  const workspaceHeight = document.querySelector(".workspace")?.getBoundingClientRect().height || window.innerHeight;
+  const minHeight = 96;
+  const maxHeight = Math.max(140, workspaceHeight - 260);
+  els.flowResizer.setPointerCapture?.(event.pointerId);
+  document.body.classList.add("resizing-flow");
+
+  const onMove = (moveEvent) => {
+    const next = Math.min(maxHeight, Math.max(minHeight, startHeight + moveEvent.clientY - startY));
+    els.flowMap.style.height = `${Math.round(next)}px`;
+    els.flowMap.style.flexBasis = `${Math.round(next)}px`;
+  };
+  const onUp = () => {
+    document.body.classList.remove("resizing-flow");
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+    window.removeEventListener("pointercancel", onUp);
+  };
+
+  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", onUp);
+  window.addEventListener("pointercancel", onUp);
 }
 
 function renderFlowMap() {
@@ -1143,7 +1173,7 @@ function startConfettiLoop() {
   });
   burst();
   confettiInterval = setInterval(burst, 350);
-  setTimeout(stopConfettiLoop, 2600);
+  setTimeout(() => window.addEventListener("mousedown", stopConfettiLoop, { once: true }), 500);
 }
 
 function stopConfettiLoop() {
