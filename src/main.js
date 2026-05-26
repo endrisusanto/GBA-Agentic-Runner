@@ -1,6 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
+import confetti from "canvas-confetti";
 import "./styles.css";
 import agenticLogo from "./assets/agentic.png";
 
@@ -80,6 +81,7 @@ const state = {
 };
 
 const app = document.querySelector("#app");
+let confettiInterval = null;
 
 app.innerHTML = `
   <div class="shell">
@@ -108,8 +110,8 @@ app.innerHTML = `
       <div class="pane-head">
         <h2>DEVICES</h2>
         <div class="pane-actions">
-          <button class="mini-button" id="unselectBtn">Select</button>
           <button class="mini-button warn" id="resetBusyBtn">Reset Busy</button>
+          <button class="mini-button" id="unselectBtn">Unselect</button>
           <button class="mini-button" id="refreshBtn">Refresh</button>
         </div>
       </div>
@@ -291,6 +293,7 @@ listen("gba-summary", (event) => {
   const payload = event.payload || {};
   ensureFlow(payload.run_id, payload.test_type, payload.devices);
   state.summaries.set(`${payload.run_id || "legacy"}:${payload.suite}:${payload.devices || ""}`, payload);
+  appendRunnerLogForRun(payload.run_id || "legacy", `[runner] Summary ${payload.suite || "-"} ${payload.devices || "-"}: total=${payload.total ?? 0} pass=${payload.passed ?? 0} fail=${payload.failed ?? 0} runtime=${payload.run_time || "N/A"}`);
   renderFlowMap();
   renderSuiteStatus();
   renderMetrics();
@@ -322,7 +325,9 @@ listen("gba-run-finished", (event) => {
   els.resultPill.disabled = !state.resultDir;
   els.resultPill.textContent = state.resultDir ? "Open" : "None";
   els.statusLine.textContent = payload.exit_code === 0 ? "Completed" : "Finished with issue";
-  appendLog(`[runner] Finished exit=${payload.exit_code} result=${state.resultDir || "N/A"}`);
+  appendRunSummaryToLog(payload.run_id || "legacy");
+  appendRunnerLogForRun(payload.run_id || "legacy", `[runner] Finished exit=${payload.exit_code} result=${state.resultDir || "N/A"}`);
+  if (Number(payload.exit_code) === 0) startConfettiLoop();
   renderFlowMap();
   renderMetrics();
   refreshDevices();
@@ -332,6 +337,7 @@ init();
 
 async function init() {
   render();
+  try { confetti({ particleCount: 0 }); } catch (_) {}
   await reconcileAutoRoot();
   await refreshDevices();
 }
@@ -409,12 +415,14 @@ function renderDevices() {
             <strong>${escapeHtml(device.model || device.serial)}</strong>
             <p><b>${escapeHtml(device.serial)}</b> <span>${escapeHtml(device.state)}</span></p>
           </div>
-          <span class="type-pill ${device.busy ? "busy" : (device.is_userdebug ? "debug" : "")}">${badge}</span>
+          <div class="device-inline-actions">
+            <span class="type-pill ${device.busy ? "busy" : (device.is_userdebug ? "debug" : "")}">${badge}</span>
+            <button class="icon-mini lamp-button ${lampActive ? "active" : ""}" data-lamp="${escapeHtml(device.serial)}" ${device.state === "device" ? "" : "disabled"} title="Toggle lamp">🌩️</button>
+            <button class="icon-mini scrcpy-button" data-scrcpy="${escapeHtml(device.serial)}" ${device.state === "device" ? "" : "disabled"} title="Open scrcpy">📱</button>
+          </div>
         </div>
         <div class="device-actions">
           <span class="busy-note">${escapeHtml(device.busy ? device.busy_reason : "")}</span>
-          <button class="icon-mini lamp-button ${lampActive ? "active" : ""}" data-lamp="${escapeHtml(device.serial)}" ${device.state === "device" ? "" : "disabled"} title="Toggle lamp">🌩️</button>
-          <button class="icon-mini scrcpy-button" data-scrcpy="${escapeHtml(device.serial)}" ${device.state === "device" ? "" : "disabled"} title="Open scrcpy">📱</button>
         </div>
         <div class="device-meta">
           <span><small>ANDROID</small>${escapeHtml(device.android || "-")}</span>
@@ -462,7 +470,6 @@ function renderTestArea() {
     return `
       <button class="mode-card ${selected ? "selected" : ""}" data-mode="${escapeHtml(mode.id)}">
         <strong>${escapeHtml(mode.name)}</strong>
-        <span>${escapeHtml(mode.flow)}</span>
       </button>
     `;
   }).join("");
@@ -1052,6 +1059,15 @@ function appendLog(line) {
   renderLog();
 }
 
+function appendRunnerLogForRun(runId, line) {
+  const text = redact(String(line || ""));
+  const stamp = new Date().toLocaleTimeString("en-GB", { hour12: false });
+  const flow = state.logFlows.get(runId) || createBootLogFlow();
+  const tab = ensureLogSubtab(flow.id, "Runner");
+  tab.lines.push(`${stamp} ${text}`);
+  renderLog();
+}
+
 function createRunLogFlow(runId, modeName, devices) {
   const primary = devices[0] || {};
   const serials = devices.map((d) => d.serial).join(",");
@@ -1106,6 +1122,34 @@ function createBootLogFlow() {
   }
   if (!state.activeLogFlow) state.activeLogFlow = id;
   return state.logFlows.get(id);
+}
+
+function appendRunSummaryToLog(runId) {
+  const summaries = [...state.summaries.values()].filter((summary) => (summary.run_id || "legacy") === runId);
+  if (!summaries.length) return;
+  const total = summaries.reduce((sum, item) => sum + Number(item.total || 0), 0);
+  const passed = summaries.reduce((sum, item) => sum + Number(item.passed || 0), 0);
+  const failed = summaries.reduce((sum, item) => sum + Number(item.failed || 0), 0);
+  appendRunnerLogForRun(runId, `[runner] Flow summary: suites=${summaries.length} total=${total} pass=${passed} fail=${failed}`);
+}
+
+function startConfettiLoop() {
+  if (confettiInterval) clearInterval(confettiInterval);
+  const defaults = { startVelocity: 30, spread: 360, ticks: 60, zIndex: 9999 };
+  const burst = () => confetti({
+    ...defaults,
+    particleCount: 40,
+    origin: { x: Math.random(), y: Math.max(0, Math.random() - 0.2) },
+  });
+  burst();
+  confettiInterval = setInterval(burst, 350);
+  setTimeout(stopConfettiLoop, 2600);
+}
+
+function stopConfettiLoop() {
+  if (confettiInterval) clearInterval(confettiInterval);
+  confettiInterval = null;
+  try { confetti.reset(); } catch (_) {}
 }
 
 function logKind(text) {

@@ -259,6 +259,7 @@ h2 {
 }
 
 .device-card.busy .device-actions,
+.device-card.busy .device-inline-actions,
 .device-card.busy .device-meta,
 .device-card.busy .device-top {
   opacity: 0.72;
@@ -271,13 +272,20 @@ h2 {
   align-items: start;
 }
 
+.device-inline-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 5px;
+}
+
 .device-actions {
   display: flex;
   align-items: center;
   justify-content: flex-end;
   gap: 6px;
-  min-height: 28px;
-  margin-top: 10px;
+  min-height: 18px;
+  margin-top: 8px;
   padding-top: 8px;
   border-top: 1px solid var(--line-soft);
 }
@@ -503,35 +511,24 @@ h2 {
 
 .mode-card {
   display: flex;
+  justify-content: center;
   align-items: center;
-  gap: 8px;
-  flex: 0 0 172px;
+  flex: 0 0 auto;
   min-width: 0;
+  width: auto;
   min-height: 38px;
-  padding: 8px 10px;
+  padding: 8px 14px;
   margin: 0;
 }
 
 .mode-card strong {
-  flex: 0 0 auto;
   color: var(--blue);
   font-size: 12px;
   white-space: nowrap;
 }
 
-.mode-card span {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--muted);
-  font-size: 10px;
-  font-weight: 900;
-}
-
 .mode-card.selected strong,
-.mode-card.selected span {
+.mode-card.selected {
   color: var(--green);
 }
 
@@ -747,12 +744,13 @@ h2 {
 }
 
 .running-log {
-  flex: 1 1 auto;
-  height: auto;
+  flex: 0 0 auto;
+  height: 300px;
   display: flex;
   flex-direction: column;
   background: #030303;
-  min-height: 260px;
+  min-height: 150px;
+  max-height: 58vh;
   resize: vertical;
   overflow: hidden;
 }
