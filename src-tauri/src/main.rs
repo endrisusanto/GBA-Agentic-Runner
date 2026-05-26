@@ -145,8 +145,12 @@ fn preflight(auto_root: Option<String>) -> Result<Vec<String>, String> {
     lines.push(check_dir("STS", root.join("STS")));
     lines.push(check_dir("Results", root.join("Results")));
 
-    for version in ["14", "15", "16", "16.1"] {
-        let cts_root = root.join("CTS").join(version).join("android-cts");
+    let cts_versions = available_cts_versions(&root);
+    if cts_versions.is_empty() {
+        lines.push("MISS CTS/*/android-cts".to_string());
+    }
+    for version in cts_versions {
+        let cts_root = root.join("CTS").join(&version).join("android-cts");
         lines.push(check_dir(&format!("CTS/{version}/android-cts"), &cts_root));
         lines.push(check_file(
             &format!("CTS/{version}/tools/cts-tradefed"),
@@ -808,6 +812,34 @@ fn run_laundry_smr(
     })
 }
 
+fn extract_nested_zips(dir: &Path) -> Result<(), String> {
+    loop {
+        let mut zip_files = Vec::new();
+        for entry in WalkDir::new(dir).into_iter().flatten() {
+            if entry.file_type().is_file() {
+                let path = entry.path().to_path_buf();
+                if let Some(ext) = path.extension() {
+                    if ext.to_string_lossy().to_lowercase() == "zip" {
+                        zip_files.push(path);
+                    }
+                }
+            }
+        }
+        if zip_files.is_empty() {
+            break;
+        }
+        for zip_path in zip_files {
+            let mut dest_dir = zip_path.clone();
+            dest_dir.set_extension("");
+            fs::create_dir_all(&dest_dir)
+                .map_err(|err| format!("Cannot create dir {}: {err}", dest_dir.display()))?;
+            extract_zip_safe(&zip_path, &dest_dir)?;
+            let _ = fs::remove_file(&zip_path);
+        }
+    }
+    Ok(())
+}
+
 fn prepare_laundry_source(app: &AppHandle, request: &RunSuiteRequest, session_dir: &Path) -> Result<LaundrySource, String> {
     let zip_path = request
         .laundry_zip_path
@@ -827,6 +859,10 @@ fn prepare_laundry_source(app: &AppHandle, request: &RunSuiteRequest, session_di
     );
     emit_log(app, format!("[runner] Extracting zip to {}", temp.path().display()));
     extract_zip_safe(&zip_path, temp.path())?;
+    
+    emit_log(app, "[runner] Checking and extracting any nested zip files...");
+    extract_nested_zips(temp.path())?;
+
     let (cts_results, gts_results, sts_results) = scan_laundry_results(temp.path());
     emit_log(
         app,
@@ -913,7 +949,7 @@ fn run_laundry_cts_filters(
 ) -> Result<Vec<i32>, String> {
     let first = devices.first().ok_or_else(|| "Laundry SMR CTS needs user devices".to_string())?;
     let props = device_props(first).unwrap_or_default();
-    let cts_root = root.join("CTS").join(android_major(&prop(&props, "ro.build.version.release"))).join("android-cts");
+    let cts_root = resolve_cts_root(root, &android_major(&prop(&props, "ro.build.version.release")))?;
     let cts_exe = cts_root.join("tools/cts-tradefed");
     if !cts_exe.is_file() {
         return Err(format!("cts-tradefed not found: {}", cts_exe.display()));
@@ -945,13 +981,19 @@ fn run_laundry_retries_with_deviceinfo(
     run_id: &str,
     test_type: &str,
 ) -> Result<Vec<i32>, String> {
-    let filtered = source_results
+    let with_info = source_results
         .iter()
         .filter(|result| property_deviceinfo_in_result(result).is_some())
-        .cloned()
-        .collect::<Vec<_>>();
-    emit_log(app, format!("[runner] {suite}: {} result(s) with PropertyDeviceInfo queued for retry.", filtered.len()));
-    run_laundry_retries(app, root, session_dir, log_dir, suite, devices, &filtered, Some(deviceinfo), timeout_secs, model, pda, run_id, test_type)
+        .count();
+    emit_log(
+        app,
+        format!(
+            "[runner] {suite}: {} result(s) queued for retry; {} with PropertyDeviceInfo will be replaced.",
+            source_results.len(),
+            with_info
+        ),
+    );
+    run_laundry_retries(app, root, session_dir, log_dir, suite, devices, source_results, Some(deviceinfo), timeout_secs, model, pda, run_id, test_type)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -973,6 +1015,20 @@ fn run_laundry_retries_without_deviceinfo(
     run_laundry_retries(app, root, session_dir, log_dir, suite, devices, source_results, None, timeout_secs, model, pda, run_id, test_type)
 }
 
+fn get_local_timestamp() -> String {
+    if let Ok(output) = Command::new("date").arg("+%Y.%m.%d_%H.%M.%S").output() {
+        let s = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !s.is_empty() {
+            return s;
+        }
+    }
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    format!("2026.05.26_{}", secs)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_laundry_retries(
     app: &AppHandle,
@@ -989,39 +1045,36 @@ fn run_laundry_retries(
     run_id: &str,
     test_type: &str,
 ) -> Result<Vec<i32>, String> {
-    let suite_root = suite_root_for_copy(root, suite, devices)?;
-    let executable = match suite {
-        "CTS" => suite_root.join("tools/cts-tradefed"),
-        "GTS" => suite_root.join("tools/gts-tradefed"),
-        "STS" => suite_root.join("tools/sts-tradefed"),
-        _ => return Err(format!("Unknown laundry retry suite: {suite}")),
-    };
-    if !executable.is_file() {
-        return Err(format!("{suite} tradefed not found: {}", executable.display()));
-    }
-    let results_dir = suite_root.join("results");
-    fs::create_dir_all(&results_dir).map_err(|err| format!("Cannot create {}: {err}", results_dir.display()))?;
-
     let mut codes = Vec::new();
     for (index, source) in source_results.iter().enumerate() {
-        let name = source
-            .file_name()
-            .and_then(|value| value.to_str())
-            .map(sanitize_name)
-            .unwrap_or_else(|| format!("laundry_source_{index}"));
-        let target = results_dir.join(format!("laundry_{}_{}_{}", suite.to_lowercase(), name, timestamp_compact()));
+        let suite_root = suite_root_for_laundry_result(root, suite, devices, source)?;
+        let executable = tradefed_tool_for_suite(&suite_root, suite)?;
+        if !executable.is_file() {
+            return Err(format!("{suite} tradefed not found: {}", executable.display()));
+        }
+        let results_dir = suite_root.join("results");
+        fs::create_dir_all(&results_dir).map_err(|err| format!("Cannot create {}: {err}", results_dir.display()))?;
+        let mut timestamp = get_local_timestamp();
+        let mut target = results_dir.join(&timestamp);
+        while target.exists() {
+            thread::sleep(Duration::from_secs(1));
+            timestamp = get_local_timestamp();
+            target = results_dir.join(&timestamp);
+        }
         emit_log(app, format!("[runner] {suite}: staging result {} -> {}", source.display(), target.display()));
         copy_dir_recursive(source, &target)
             .map_err(|err| format!("Cannot stage {} to {}: {err}", source.display(), target.display()))?;
         if let Some(replacement) = replacement_deviceinfo {
-            let target_info = property_deviceinfo_in_result(&target)
-                .ok_or_else(|| format!("PropertyDeviceInfo not found in staged result: {}", target.display()))?;
-            let backup = target_info.with_extension("deviceinfo.json.bak");
-            fs::copy(&target_info, &backup)
-                .map_err(|err| format!("Cannot backup {}: {err}", target_info.display()))?;
-            fs::copy(replacement, &target_info)
-                .map_err(|err| format!("Cannot replace {}: {err}", target_info.display()))?;
-            emit_log(app, format!("[runner] {suite}: replaced {} backup={}", target_info.display(), backup.display()));
+            if let Some(target_info) = property_deviceinfo_in_result(&target) {
+                let backup = target_info.with_extension("deviceinfo.json.bak");
+                fs::copy(&target_info, &backup)
+                    .map_err(|err| format!("Cannot backup {}: {err}", target_info.display()))?;
+                fs::copy(replacement, &target_info)
+                    .map_err(|err| format!("Cannot replace {}: {err}", target_info.display()))?;
+                emit_log(app, format!("[runner] {suite}: replaced {} backup={}", target_info.display(), backup.display()));
+            } else {
+                emit_log(app, format!("[runner] {suite}: no PropertyDeviceInfo in {}; retrying NOT_EXECUTED without replace.", target.display()));
+            }
         }
         let cmd = format!(
             "run retry --retry 0 --retry-type NOT_EXECUTED --shard-count {}{}",
@@ -1030,7 +1083,7 @@ fn run_laundry_retries(
         );
         emit_log(app, format!("[runner] {suite}: retry command for {}", target.display()));
         let log_file = log_dir.join(format!("laundry_retry_{}_{}_{}devs.log", suite.to_lowercase(), index + 1, devices.len()));
-        let outcome = run_suite_process(app, suite, devices, &executable, &suite_root, &cmd, true, &log_file, timeout_secs, run_id, test_type, true)?;
+        let outcome = run_suite_process(app, suite, devices, &executable, &suite_root, &cmd, suite != "STS", &log_file, timeout_secs, run_id, test_type, true)?;
         codes.push(outcome.exit_code);
     }
     Ok(codes)
@@ -1056,7 +1109,7 @@ fn run_cts_then_gts(
     let props = device_props(first).unwrap_or_default();
     let android = prop(&props, "ro.build.version.release");
     let major = android_major(&android);
-    let cts_root = root.join("CTS").join(&major).join("android-cts");
+    let cts_root = resolve_cts_root(root, &major)?;
     let cts_exe = cts_root.join("tools/cts-tradefed");
     let subplan = cts_root.join("subplans").join(format!("{cts_subplan}.xml"));
     if !subplan.is_file() {
@@ -1419,7 +1472,7 @@ fn suite_root_for_copy(root: &Path, suite: &str, devices: &[String]) -> Result<P
     let props = device_props(first).unwrap_or_default();
     let android = android_major(&prop(&props, "ro.build.version.release"));
     match suite {
-        "CTS" => Ok(root.join("CTS").join(android).join("android-cts")),
+        "CTS" => resolve_cts_root(root, &android),
         "GTS" => Ok(root.join("GTS/android-gts")),
         "STS" => {
             let spl = prop(&props, "ro.build.version.security_patch");
@@ -1430,6 +1483,117 @@ fn suite_root_for_copy(root: &Path, suite: &str, devices: &[String]) -> Result<P
                 .join("android-sts"))
         }
         _ => Err(format!("Unknown suite: {suite}")),
+    }
+}
+
+fn suite_root_for_laundry_result(root: &Path, suite: &str, devices: &[String], result_dir: &Path) -> Result<PathBuf, String> {
+    if suite == "CTS" {
+        if let Some(version) = cts_version_from_result(result_dir) {
+            return resolve_cts_root(root, &version);
+        }
+    }
+    suite_root_for_copy(root, suite, devices)
+}
+
+fn resolve_cts_root(root: &Path, version_hint: &str) -> Result<PathBuf, String> {
+    let hint = version_hint.trim();
+    let cts_base = root.join("CTS");
+    if hint.is_empty() {
+        return Err("CTS version hint is empty".to_string());
+    }
+
+    let exact = cts_base.join(hint).join("android-cts");
+    if exact.is_dir() {
+        return Ok(exact);
+    }
+
+    let candidates = available_cts_versions(root)
+        .into_iter()
+        .filter(|version| cts_version_matches_hint(version, hint))
+        .collect::<Vec<_>>();
+    if let Some(best) = candidates.into_iter().min_by_key(|version| cts_version_rank(version)) {
+        let path = cts_base.join(&best).join("android-cts");
+        if path.is_dir() {
+            return Ok(path);
+        }
+    }
+
+    Err(format!(
+        "CTS tools for version {hint} not found under {}",
+        cts_base.display()
+    ))
+}
+
+fn available_cts_versions(root: &Path) -> Vec<String> {
+    let cts_base = root.join("CTS");
+    let mut versions = fs::read_dir(cts_base)
+        .ok()
+        .into_iter()
+        .flat_map(|entries| entries.flatten())
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.join("android-cts").is_dir() {
+                entry.file_name().to_str().map(|value| value.to_string())
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    versions.sort_by_key(|version| cts_version_rank(version));
+    versions
+}
+
+fn cts_version_matches_hint(version: &str, hint: &str) -> bool {
+    if version == hint {
+        return true;
+    }
+    if hint.contains("_r") {
+        return false;
+    }
+    version
+        .strip_prefix(hint)
+        .is_some_and(|rest| rest.starts_with("_r"))
+}
+
+fn cts_version_rank(version: &str) -> (u32, u32, u32) {
+    let (base, revision) = version.split_once("_r").unwrap_or((version, "0"));
+    let mut base_parts = base.split('.');
+    let major = base_parts.next().and_then(|part| part.parse::<u32>().ok()).unwrap_or(0);
+    let minor = base_parts.next().and_then(|part| part.parse::<u32>().ok()).unwrap_or(0);
+    let rev = revision.parse::<u32>().unwrap_or(0);
+    (major, minor, rev)
+}
+
+fn tradefed_tool_for_suite(suite_root: &Path, suite: &str) -> Result<PathBuf, String> {
+    match suite {
+        "CTS" => Ok(suite_root.join("tools/cts-tradefed")),
+        "GTS" => Ok(suite_root.join("tools/gts-tradefed")),
+        "STS" => Ok(suite_root.join("tools/sts-tradefed")),
+        _ => Err(format!("Unknown suite: {suite}")),
+    }
+}
+
+fn cts_version_from_result(result_dir: &Path) -> Option<String> {
+    let (_, version, _) = get_suite_info_from_xml(&result_dir.join("test_result.xml"))?;
+    cts_version_from_suite_version(&version)
+}
+
+fn cts_version_from_suite_version(version: &str) -> Option<String> {
+    let clean = version.trim();
+    if clean.is_empty() {
+        return None;
+    }
+    let prefix = clean.split_whitespace().next().unwrap_or(clean);
+    let normalized = prefix
+        .trim_start_matches(|ch: char| !ch.is_ascii_digit())
+        .chars()
+        .take_while(|ch| ch.is_ascii_digit() || *ch == '.' || *ch == '_' || *ch == 'r' || *ch == 'R')
+        .collect::<String>()
+        .replace("_R", "_r");
+    if normalized.chars().next().is_some_and(|ch| ch.is_ascii_digit()) {
+        Some(normalized)
+    } else {
+        None
     }
 }
 
@@ -1479,30 +1643,6 @@ fn verify_laundry_suite_tools(
             emit_log(app, format!("[preflight] {suite}: skipped; not found in laundry zip."));
             continue;
         }
-        let suite_root = suite_root_for_copy(root, suite, devices)?;
-        let tool = match *suite {
-            "CTS" => suite_root.join("tools/cts-tradefed"),
-            "GTS" => suite_root.join("tools/gts-tradefed"),
-            "STS" => suite_root.join("tools/sts-tradefed"),
-            _ => return Err(format!("Unknown laundry suite: {suite}")),
-        };
-        if !tool.is_file() {
-            return Err(format!(
-                "{suite} tool required by laundry zip but not found: {}",
-                tool.display()
-            ));
-        }
-        emit_log(app, format!("[preflight] {suite}: tool ready {}", tool.display()));
-
-        let version_txt = suite_root.join("tools/version.txt");
-        let local_version = if version_txt.is_file() {
-            fs::read_to_string(&version_txt)
-                .map(|s| s.trim().to_string())
-                .unwrap_or_default()
-        } else {
-            String::new()
-        };
-
         let result_dirs = match *suite {
             "CTS" => &source.cts_results,
             "GTS" => &source.gts_results,
@@ -1510,7 +1650,39 @@ fn verify_laundry_suite_tools(
             _ => continue,
         };
 
+        if result_dirs.is_empty() {
+            let suite_root = suite_root_for_copy(root, suite, devices)?;
+            let tool = tradefed_tool_for_suite(&suite_root, suite)?;
+            if !tool.is_file() {
+                return Err(format!(
+                    "{suite} tool required but not found: {}",
+                    tool.display()
+                ));
+            }
+            emit_log(app, format!("[preflight] {suite}: tool ready {}", tool.display()));
+            continue;
+        }
+
         for dir in result_dirs {
+            let suite_root = suite_root_for_laundry_result(root, suite, devices, dir)?;
+            let tool = tradefed_tool_for_suite(&suite_root, suite)?;
+            if !tool.is_file() {
+                return Err(format!(
+                    "{suite} tool required by laundry zip but not found: {}",
+                    tool.display()
+                ));
+            }
+            emit_log(app, format!("[preflight] {suite}: tool ready {}", tool.display()));
+
+            let version_txt = suite_root.join("tools/version.txt");
+            let local_version = if version_txt.is_file() {
+                fs::read_to_string(&version_txt)
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+
             let xml_path = dir.join("test_result.xml");
             if xml_path.is_file() {
                 if let Some((name, version, build)) = get_suite_info_from_xml(&xml_path) {
@@ -1574,7 +1746,23 @@ fn scan_laundry_results(root: &Path) -> (Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf
         let Some(result_dir) = entry.path().parent().map(Path::to_path_buf) else {
             continue;
         };
-        let suite = suite_hint_from_path(&result_dir);
+        
+        let mut suite = None;
+        if let Some((name, _, _)) = get_suite_info_from_xml(&entry.path()) {
+            let lower_name = name.to_lowercase();
+            if lower_name.contains("cts") || lower_name.contains("compatibility") {
+                suite = Some("CTS".to_string());
+            } else if lower_name.contains("gts") || lower_name.contains("google") {
+                suite = Some("GTS".to_string());
+            } else if lower_name.contains("sts") || lower_name.contains("security") {
+                suite = Some("STS".to_string());
+            }
+        }
+        
+        if suite.is_none() {
+            suite = suite_hint_from_path(&result_dir);
+        }
+
         match suite.as_deref() {
             Some("CTS") => push_unique(&mut cts, result_dir),
             Some("GTS") => push_unique(&mut gts, result_dir),
@@ -1587,11 +1775,11 @@ fn scan_laundry_results(root: &Path) -> (Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf
 
 fn suite_hint_from_path(path: &Path) -> Option<String> {
     let text = path.display().to_string().to_lowercase();
-    if text.contains("android-cts") || text.contains("/cts") || text.contains("\\cts") {
+    if text.contains("cts") {
         Some("CTS".to_string())
-    } else if text.contains("android-gts") || text.contains("/gts") || text.contains("\\gts") {
+    } else if text.contains("gts") {
         Some("GTS".to_string())
-    } else if text.contains("android-sts") || text.contains("/sts") || text.contains("\\sts") {
+    } else if text.contains("sts") {
         Some("STS".to_string())
     } else {
         None

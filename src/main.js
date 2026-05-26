@@ -1000,7 +1000,8 @@ function appendLog(line) {
 
 function createRunLogFlow(runId, modeName, devices) {
   const primary = devices[0] || {};
-  const deviceTitle = `${primary.serial || "NO_SERIAL"} ${primary.pda || "NO_PDA"} ${primary.model || "NO_MODEL"}`;
+  const serials = devices.map((d) => d.serial).join(",");
+  const deviceTitle = `${primary.model || "NO_MODEL"} | ${primary.pda || "NO_PDA"} [${serials}]`;
   const flow = {
     id: runId,
     title: `${modeName} | ${deviceTitle}`,
