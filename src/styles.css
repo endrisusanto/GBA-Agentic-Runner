@@ -315,6 +315,20 @@ h2 {
   background: #10231b;
 }
 
+.check-dot.loading {
+  border-color: #343a3a;
+  border-top-color: var(--blue);
+  border-right-color: var(--cyan);
+  background: transparent;
+  animation: busy-spin 0.85s linear infinite;
+}
+
+@keyframes busy-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .device-top strong {
   display: block;
   font-size: 14px;

@@ -413,7 +413,7 @@ function renderDevices() {
     return `
       <article class="device-card ${selected ? "selected" : ""} ${ready ? "" : "disabled"} ${device.busy ? "busy" : ""}" data-serial="${escapeHtml(device.serial)}" role="button" tabindex="${ready ? "0" : "-1"}">
         <div class="device-top">
-          <span class="check-dot ${selected ? "checked" : ""}">${selected ? "✓" : ""}</span>
+          <span class="check-dot ${selected ? "checked" : ""} ${device.busy ? "loading" : ""}">${device.busy ? "" : (selected ? "✓" : "")}</span>
           <div>
             <strong>${escapeHtml(device.model || device.serial)}</strong>
             <p><b>${escapeHtml(device.serial)}</b> <span>${escapeHtml(device.state)}</span></p>
