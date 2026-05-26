@@ -64,6 +64,8 @@ const state = {
   selected: new Set(),
   selectedMode: "Laundry SMR",
   laundryZipPath: "",
+  laundryResults: [],
+  selectedLaundryResults: new Set(),
   lampStates: new Map(),
   running: false,
   activeRuns: new Set(),
@@ -293,6 +295,22 @@ listen("gba-summary", (event) => {
   renderSuiteStatus();
   renderMetrics();
 });
+listen("gba-laundry-result-update", (event) => {
+  const payload = event.payload || {};
+  if (!payload.id) return;
+  state.laundryResults = state.laundryResults.map((row) => {
+    if (row.id !== payload.id) return row;
+    return {
+      ...row,
+      status: payload.status || row.status,
+      time: payload.time || row.time,
+      total: Number(payload.total ?? row.total ?? 0),
+      passed: Number(payload.passed ?? row.passed ?? 0),
+      failed: Number(payload.failed ?? row.failed ?? 0),
+    };
+  });
+  renderFlowMap();
+});
 listen("gba-run-finished", (event) => {
   const payload = event.payload || {};
   if (payload.run_id) state.activeRuns.delete(payload.run_id);
@@ -500,11 +518,10 @@ function renderLogTabs() {
 }
 
 function renderFlowMap() {
-  const runIds = [...state.flows.keys()].filter((runId) => runId !== "boot");
-  if (!runIds.length) {
+  if (!isLaundryMode(state.selectedMode)) {
     const mode = TEST_MODES.find((item) => item.id === state.selectedMode);
     els.flowMap.innerHTML = `
-      <div class="flow-map-empty">
+      <div class="laundry-table-empty">
         <strong>${escapeHtml(mode?.name || "Flow")}</strong>
         <span>${escapeHtml(mode?.flow || "Select devices and run")}</span>
       </div>
@@ -512,77 +529,89 @@ function renderFlowMap() {
     return;
   }
 
-  els.flowMap.innerHTML = runIds.slice(-4).reverse().map((runId) => {
-    const flow = state.flows.get(runId);
-    const nodes = flowNodes(flow?.mode || "");
-    const runStatuses = [...state.suiteStatuses.values()].filter((status) => (status.run_id || "legacy") === runId);
-    const active = state.activeRuns.has(runId);
-    const body = nodes.map((node, index) => {
-      const status = nodeStatus(node, runStatuses, index, nodes);
-      return `
-        <div class="flow-node ${status.className}">
-          <span class="node-dot">${index + 1}</span>
-          <div>
-            <strong>${escapeHtml(node.label)}</strong>
-            <small>${escapeHtml(status.text)}</small>
-          </div>
-        </div>
-      `;
-    }).join(`<div class="flow-edge"></div>`);
+  if (!state.laundryZipPath || !state.laundryResults.length) {
+    els.flowMap.innerHTML = `
+      <div class="laundry-table-empty">
+        <strong>${escapeHtml(state.selectedMode)}</strong>
+        <span>Pick laundry zip to preview CTS, GTS, and STS results.</span>
+      </div>
+    `;
+    return;
+  }
+
+  const selectedCount = state.selectedLaundryResults.size;
+  const rows = state.laundryResults.map((row) => {
+    const checked = state.selectedLaundryResults.has(row.id);
+    const status = laundryRowStatus(row, checked);
     return `
-      <article class="flow-map-card ${active ? "active" : ""}">
-        <header>
-          <div>
-            <strong>${escapeHtml(flow?.mode || "Run")}</strong>
-            <span>${escapeHtml(flow?.devices || "-")}</span>
-          </div>
-          <em>${active ? "RUNNING" : "DONE"}</em>
-        </header>
-        <div class="flow-node-row">${body}</div>
-      </article>
+      <tr class="${checked ? "selected" : "skipped"}">
+        <td class="select-cell">
+          <input class="laundry-result-check" type="checkbox" data-id="${escapeHtml(row.id)}" ${checked ? "checked" : ""} />
+        </td>
+        <td>
+          <strong>${escapeHtml(row.testcase || row.suite)}</strong>
+          <span>${escapeHtml(row.suite_version || "-")} · ${escapeHtml(row.result_dir || "-")}</span>
+        </td>
+        <td class="subtest-cell">${escapeHtml(row.subtestcases || "-")}</td>
+        <td><span class="status-pill status-${statusClass(status)}">${escapeHtml(status)}</span></td>
+        <td class="time-cell">${escapeHtml(row.time || "-")}</td>
+        <td class="result-cell">
+          <span>Total ${Number(row.total || 0)}</span>
+          <b class="pass">Pass ${Number(row.passed || 0)}</b>
+          <b class="fail">Fail ${Number(row.failed || 0)}</b>
+        </td>
+      </tr>
     `;
   }).join("");
+
+  els.flowMap.innerHTML = `
+    <div class="laundry-table-wrap">
+      <header class="laundry-table-head">
+        <strong>${escapeHtml(state.selectedMode)}</strong>
+        <span>${selectedCount}/${state.laundryResults.length} selected · ${escapeHtml(fileName(state.laundryZipPath))}</span>
+      </header>
+      <table class="laundry-table">
+        <thead>
+          <tr>
+            <th>Select</th>
+            <th>Testcase</th>
+            <th>Subtestcases</th>
+            <th>Status</th>
+            <th>Time</th>
+            <th>Results</th>
+          </tr>
+        </thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>
+  `;
+
+  els.flowMap.querySelectorAll(".laundry-result-check").forEach((input) => {
+    input.addEventListener("change", () => {
+      if (input.checked) state.selectedLaundryResults.add(input.dataset.id);
+      else state.selectedLaundryResults.delete(input.dataset.id);
+      renderFlowMap();
+    });
+  });
 }
 
-function flowNodes(modeName) {
-  if (modeName === "Laundry Normal") {
-    return [
-      { label: "GTS property", suites: ["GTS"] },
-      { label: "DeviceInfo", suites: ["GTS"], text: "replace" },
-      { label: "CTS retry", suites: ["CTS"] },
-      { label: "GTS retry", suites: ["GTS"] },
-    ];
-  }
-  if (modeName === "Laundry SMR") {
-    return [
-      { label: "GTS gtsmr", suites: ["GTS"] },
-      { label: "CTS filters", suites: ["CTS"] },
-      { label: "GTS retry", suites: ["GTS"] },
-      { label: "STS retry", suites: ["STS"] },
-    ];
-  }
-  if (modeName === "STS") return [{ label: "STS", suites: ["STS"] }];
-  if (modeName === "SMR") return [{ label: "CTS", suites: ["CTS"] }, { label: "GTS", suites: ["GTS"] }, { label: "STS", suites: ["STS"] }];
-  return [{ label: "CTS", suites: ["CTS"] }, { label: "GTS", suites: ["GTS"] }];
-}
-
-function nodeStatus(node, statuses, index, nodes) {
-  const matches = statuses.filter((status) => node.suites.includes(status.suite));
+function laundryRowStatus(row, checked) {
+  if (!checked) return "Skipped";
+  if (row.status && row.status !== "Ready") return row.status;
+  const matches = [...state.suiteStatuses.values()].filter((status) => {
+    const flow = state.flows.get(status.run_id || "legacy");
+    return flow?.mode === state.selectedMode && status.suite === row.suite;
+  });
   if (matches.some((status) => ["Failed", "Timeout", "Cancelled"].includes(status.status))) {
-    return { className: "failed", text: matches.find((status) => ["Failed", "Timeout", "Cancelled"].includes(status.status))?.status || "Failed" };
+    return matches.find((status) => ["Failed", "Timeout", "Cancelled"].includes(status.status))?.status || "Failed";
   }
   if (matches.some((status) => status.status === "Test Done" || status.status === "Completed")) {
-    return { className: "done", text: node.text || "done" };
+    return "Test Done";
   }
-  if (matches.some((status) => ["Starting", "Running", "Copying result"].includes(status.status))) {
-    const status = matches.find((item) => ["Starting", "Running", "Copying result"].includes(item.status));
-    return { className: "running", text: status?.status || "running" };
+  if (matches.some((status) => ["Starting", "Running", "Copying result", "Waiting device reconnect"].includes(status.status))) {
+    return matches.find((item) => ["Starting", "Running", "Copying result", "Waiting device reconnect"].includes(item.status))?.status || "Running";
   }
-  const previousDone = nodes.slice(0, index).every((prev) => {
-    const prevMatches = statuses.filter((status) => prev.suites.includes(status.suite));
-    return prevMatches.some((status) => status.status === "Test Done" || status.status === "Completed");
-  });
-  return { className: previousDone && statuses.length ? "queued" : "idle", text: previousDone && statuses.length ? "queued" : "standby" };
+  return "Ready";
 }
 
 function renderSuiteStatus() {
@@ -616,8 +645,8 @@ function renderSuiteStatus() {
             <em>${formatDuration(Number(status.elapsed_secs || 0))}</em>
           </div>
           <div class="suite-badges">
-            <span class="count-badge pass">Pass ${passed}</span>
-            <span class="count-badge fail">Fail ${failed}</span>
+            <span class="count-badge pass">${passed}</span>
+            <span class="count-badge fail">${failed}</span>
           </div>
         </div>
       `;
@@ -735,7 +764,21 @@ async function chooseLaundryZip() {
   const path = normalizeDialogPath(selected);
   if (path) {
     state.laundryZipPath = path;
+    state.laundryResults = [];
+    state.selectedLaundryResults = new Set();
     appendLog(`[runner] Laundry zip selected: ${path}`);
+    renderFlowMap();
+    try {
+      const rows = await invoke("analyze_laundry_zip", { zipPath: path });
+      state.laundryResults = Array.isArray(rows) ? rows : [];
+      state.selectedLaundryResults = new Set(state.laundryResults.map((row) => row.id));
+      appendLog(`[runner] Laundry zip scanned: ${state.laundryResults.length} result(s).`);
+      renderFlowMap();
+    } catch (error) {
+      appendLog(`[runner] Laundry zip scan failed: ${error}`);
+      els.statusLine.textContent = "Laundry zip scan failed";
+      renderFlowMap();
+    }
   }
 }
 
@@ -755,11 +798,21 @@ async function runSelected() {
   }
   if (isLaundryMode(runMode) && !state.laundryZipPath) {
     await chooseLaundryZip();
+    if (state.laundryZipPath) {
+      appendLog("[runner] Laundry zip loaded. Select testcase rows, then click Run Selected again.");
+      els.statusLine.textContent = "Select laundry testcase rows";
+      return;
+    }
     if (!state.laundryZipPath) {
       appendLog("[runner] Laundry flow needs zip file.");
       els.statusLine.textContent = "Laundry zip required";
       return;
     }
+  }
+  if (isLaundryMode(runMode) && state.laundryResults.length && state.selectedLaundryResults.size === 0) {
+    appendLog("[runner] Select at least one laundry result row.");
+    els.statusLine.textContent = "Laundry result selection required";
+    return;
   }
 
   const autoRoot = state.autoRoot || await invoke("default_auto_root");
@@ -804,6 +857,7 @@ async function runSelected() {
           auto_root: autoRoot,
           test_type: runMode,
           laundry_zip_path: isLaundryMode(runMode) ? state.laundryZipPath : null,
+          selected_laundry_results: isLaundryMode(runMode) ? [...state.selectedLaundryResults] : [],
           user_devices: groupUserDevices,
           userdebug_devices: groupUserdebugDevices,
           retry_count: state.retryCount,
@@ -1083,6 +1137,10 @@ function normalizeDialogPath(selected) {
   if (typeof selected === "string") return selected;
   if (Array.isArray(selected)) return normalizeDialogPath(selected[0]);
   return selected.path || selected.file || selected.toString?.() || "";
+}
+
+function fileName(path) {
+  return String(path || "").split(/[\\/]/).filter(Boolean).pop() || "-";
 }
 
 function redact(text) {

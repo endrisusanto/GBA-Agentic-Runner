@@ -1,19 +1,21 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tauri::{AppHandle, Emitter, Manager, State};
 use tempfile::TempDir;
 use walkdir::WalkDir;
 use zip::ZipArchive;
+
+const DEVICE_RECONNECT_TIMEOUT_SECS: u64 = 300;
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -44,6 +46,8 @@ struct RunSuiteRequest {
     auto_root: String,
     test_type: String,
     laundry_zip_path: Option<String>,
+    #[serde(default)]
+    selected_laundry_results: Vec<String>,
     user_devices: Vec<String>,
     userdebug_devices: Vec<String>,
     retry_count: u32,
@@ -83,6 +87,34 @@ struct RunFinished {
     test_type: String,
     exit_code: i32,
     result_dir: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct LaundryResultInfo {
+    id: String,
+    suite: String,
+    testcase: String,
+    subtestcases: String,
+    status: String,
+    time: String,
+    total: u64,
+    passed: u64,
+    failed: u64,
+    suite_version: String,
+    result_dir: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct LaundryResultUpdate {
+    run_id: String,
+    test_type: String,
+    id: String,
+    suite: String,
+    status: String,
+    time: String,
+    total: u64,
+    passed: u64,
+    failed: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -137,15 +169,23 @@ fn preflight(auto_root: Option<String>) -> Result<Vec<String>, String> {
     lines.push(check_command("java"));
     lines.push(check_dir("CTS", root.join("CTS")));
     lines.push(check_dir("GTS", root.join("GTS")));
-    lines.push(check_dir("GTS/android-gts", root.join("GTS/android-gts")));
-    lines.push(check_file(
-        "gts-tradefed",
-        root.join("GTS/android-gts/tools/gts-tradefed"),
-    ));
     lines.push(check_dir("STS", root.join("STS")));
     lines.push(check_dir("Results", root.join("Results")));
 
-    let cts_versions = available_cts_versions(&root);
+    let gts_versions = available_suite_versions(&root, "GTS", "android-gts");
+    if gts_versions.is_empty() {
+        lines.push("MISS GTS/*/android-gts".to_string());
+    }
+    for version in gts_versions {
+        let gts_root = root.join("GTS").join(&version).join("android-gts");
+        lines.push(check_dir(&format!("GTS/{version}/android-gts"), &gts_root));
+        lines.push(check_file(
+            &format!("GTS/{version}/tools/gts-tradefed"),
+            gts_root.join("tools/gts-tradefed"),
+        ));
+    }
+
+    let cts_versions = available_suite_versions(&root, "CTS", "android-cts");
     if cts_versions.is_empty() {
         lines.push("MISS CTS/*/android-cts".to_string());
     }
@@ -223,6 +263,30 @@ fn list_devices() -> Result<Vec<DeviceInfo>, String> {
 #[tauri::command]
 fn generate_ro_xml(serial: String, output_dir: String) -> Result<String, String> {
     generate_ro_xml_file(&serial, Path::new(&output_dir))
+}
+
+#[tauri::command]
+fn analyze_laundry_zip(zip_path: String) -> Result<Vec<LaundryResultInfo>, String> {
+    let zip_path = PathBuf::from(zip_path);
+    if !zip_path.is_file() {
+        return Err(format!("Laundry zip not found: {}", zip_path.display()));
+    }
+
+    let temp = tempfile::Builder::new()
+        .prefix("gba-laundry-preview-")
+        .tempdir()
+        .map_err(|err| format!("Cannot create laundry preview dir: {err}"))?;
+    extract_zip_safe(&zip_path, temp.path())?;
+    extract_nested_zips(temp.path())?;
+
+    let mut rows = scan_laundry_result_infos(temp.path())?;
+    rows.sort_by(|a, b| {
+        a.suite
+            .cmp(&b.suite)
+            .then(a.suite_version.cmp(&b.suite_version))
+            .then(a.result_dir.cmp(&b.result_dir))
+    });
+    Ok(rows)
 }
 
 #[tauri::command]
@@ -633,6 +697,7 @@ fn run_suite_blocking(app: AppHandle, root: PathBuf, request: RunSuiteRequest, r
 #[derive(Debug, Clone)]
 struct LaundrySource {
     _temp: std::sync::Arc<TempDir>,
+    extract_root: PathBuf,
     cts_results: Vec<PathBuf>,
     gts_results: Vec<PathBuf>,
     sts_results: Vec<PathBuf>,
@@ -675,6 +740,7 @@ fn run_laundry_normal(
         log_dir,
         "CTS",
         devices,
+        &source.extract_root,
         &source.cts_results,
         &deviceinfo,
         request.timeout_secs,
@@ -690,6 +756,7 @@ fn run_laundry_normal(
         log_dir,
         "GTS",
         devices,
+        &source.extract_root,
         &source.gts_results,
         &deviceinfo,
         request.timeout_secs,
@@ -731,6 +798,7 @@ fn run_laundry_smr(
         let session_sts = session_dir.to_path_buf();
         let log_sts = log_dir.to_path_buf();
         let devices_sts = request.userdebug_devices.clone();
+        let source_root_sts = source.extract_root.clone();
         let source_sts = source.sts_results.clone();
         let timeout_sts = request.timeout_secs;
         let model_sts = model.to_string();
@@ -745,6 +813,7 @@ fn run_laundry_smr(
                 &log_sts,
                 "STS",
                 &devices_sts,
+                &source_root_sts,
                 &source_sts,
                 timeout_sts,
                 &model_sts,
@@ -779,9 +848,14 @@ fn run_laundry_smr(
         codes.extend(run_laundry_cts_filters(
             app,
             root,
+            session_dir,
             log_dir,
             &request.user_devices,
+            &source.extract_root,
+            &source.cts_results,
             request.timeout_secs,
+            model,
+            pda,
             run_id,
             &request.test_type,
         )?);
@@ -792,6 +866,7 @@ fn run_laundry_smr(
             log_dir,
             "GTS",
             &request.user_devices,
+            &source.extract_root,
             &source.gts_results,
             &deviceinfo,
             request.timeout_secs,
@@ -863,7 +938,20 @@ fn prepare_laundry_source(app: &AppHandle, request: &RunSuiteRequest, session_di
     emit_log(app, "[runner] Checking and extracting any nested zip files...");
     extract_nested_zips(temp.path())?;
 
-    let (cts_results, gts_results, sts_results) = scan_laundry_results(temp.path());
+    let (mut cts_results, mut gts_results, mut sts_results) = scan_laundry_results(temp.path());
+    if !request.selected_laundry_results.is_empty() {
+        let selected: HashSet<String> = request.selected_laundry_results.iter().cloned().collect();
+        cts_results.retain(|path| selected.contains(&laundry_result_id(temp.path(), path)));
+        gts_results.retain(|path| selected.contains(&laundry_result_id(temp.path(), path)));
+        sts_results.retain(|path| selected.contains(&laundry_result_id(temp.path(), path)));
+        emit_log(
+            app,
+            format!(
+                "[runner] Custom laundry selection applied: {} result(s)",
+                cts_results.len() + gts_results.len() + sts_results.len()
+            ),
+        );
+    }
     emit_log(
         app,
         format!(
@@ -873,8 +961,10 @@ fn prepare_laundry_source(app: &AppHandle, request: &RunSuiteRequest, session_di
             sts_results.len()
         ),
     );
+    let extract_root = temp.path().to_path_buf();
     Ok(LaundrySource {
         _temp: temp,
+        extract_root,
         cts_results,
         gts_results,
         sts_results,
@@ -891,11 +981,11 @@ fn run_laundry_initial_gts(
     gts_command: &str,
     timeout_secs: u64,
     model: &str,
-    pda: &str,
+    _pda: &str,
     run_id: &str,
     test_type: &str,
 ) -> Result<PathBuf, String> {
-    let gts_root = root.join("GTS/android-gts");
+    let gts_root = resolve_gts_root(root, "")?;
     let gts_exe = gts_root.join("tools/gts-tradefed");
     if !gts_exe.is_file() {
         return Err(format!("gts-tradefed not found: {}", gts_exe.display()));
@@ -934,16 +1024,20 @@ fn run_laundry_initial_gts(
     fs::copy(&deviceinfo, &stable_deviceinfo)
         .map_err(|err| format!("Cannot preserve deviceinfo {}: {err}", deviceinfo.display()))?;
     emit_log(app, format!("[runner] Deviceinfo preserved: {}", stable_deviceinfo.display()));
-    copy_suite_result(app, root, session_dir, "GTS", devices, model, pda, &log_file, outcome.elapsed_secs, run_id, test_type)?;
     Ok(stable_deviceinfo)
 }
 
 fn run_laundry_cts_filters(
     app: &AppHandle,
     root: &Path,
+    session_dir: &Path,
     log_dir: &Path,
     devices: &[String],
+    source_root: &Path,
+    source_results: &[PathBuf],
     timeout_secs: u64,
+    model: &str,
+    pda: &str,
     run_id: &str,
     test_type: &str,
 ) -> Result<Vec<i32>, String> {
@@ -961,7 +1055,22 @@ fn run_laundry_cts_filters(
     );
     emit_log(app, "[runner] Laundry SMR: running CTS EDI/security filters.");
     let log_file = log_dir.join(format!("laundry_cts_filters_{}devs.log", devices.len()));
+    let copy_started = SystemTime::now();
+    emit_laundry_result_updates(app, source_root, source_results, run_id, test_type, "CTS", "Running", 0, None);
     let outcome = run_suite_process(app, "CTS", devices, &cts_exe, &cts_root, &cmd, true, &log_file, timeout_secs, run_id, test_type, true)?;
+    copy_latest_suite_zip_artifact(app, session_dir, "CTS", &cts_root, copy_started, model, pda, devices, "filters")?;
+    let summary = parse_summary(&log_file, "CTS", &devices.join(","), run_id, test_type);
+    emit_laundry_result_updates(
+        app,
+        source_root,
+        source_results,
+        run_id,
+        test_type,
+        "CTS",
+        if outcome.exit_code == 0 { "Test Done" } else { "Failed" },
+        outcome.elapsed_secs,
+        Some(&summary),
+    );
     Ok(vec![outcome.exit_code])
 }
 
@@ -973,6 +1082,7 @@ fn run_laundry_retries_with_deviceinfo(
     log_dir: &Path,
     suite: &str,
     devices: &[String],
+    source_root: &Path,
     source_results: &[PathBuf],
     deviceinfo: &Path,
     timeout_secs: u64,
@@ -993,7 +1103,7 @@ fn run_laundry_retries_with_deviceinfo(
             with_info
         ),
     );
-    run_laundry_retries(app, root, session_dir, log_dir, suite, devices, source_results, Some(deviceinfo), timeout_secs, model, pda, run_id, test_type)
+    run_laundry_retries(app, root, session_dir, log_dir, suite, devices, source_root, source_results, Some(deviceinfo), timeout_secs, model, pda, run_id, test_type)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1004,6 +1114,7 @@ fn run_laundry_retries_without_deviceinfo(
     log_dir: &Path,
     suite: &str,
     devices: &[String],
+    source_root: &Path,
     source_results: &[PathBuf],
     timeout_secs: u64,
     model: &str,
@@ -1012,7 +1123,7 @@ fn run_laundry_retries_without_deviceinfo(
     test_type: &str,
 ) -> Result<Vec<i32>, String> {
     emit_log(app, format!("[runner] {suite}: {} result(s) queued for retry.", source_results.len()));
-    run_laundry_retries(app, root, session_dir, log_dir, suite, devices, source_results, None, timeout_secs, model, pda, run_id, test_type)
+    run_laundry_retries(app, root, session_dir, log_dir, suite, devices, source_root, source_results, None, timeout_secs, model, pda, run_id, test_type)
 }
 
 fn get_local_timestamp() -> String {
@@ -1033,20 +1144,22 @@ fn get_local_timestamp() -> String {
 fn run_laundry_retries(
     app: &AppHandle,
     root: &Path,
-    _session_dir: &Path,
+    session_dir: &Path,
     log_dir: &Path,
     suite: &str,
     devices: &[String],
+    source_root: &Path,
     source_results: &[PathBuf],
     replacement_deviceinfo: Option<&Path>,
     timeout_secs: u64,
-    _model: &str,
-    _pda: &str,
+    model: &str,
+    pda: &str,
     run_id: &str,
     test_type: &str,
 ) -> Result<Vec<i32>, String> {
     let mut codes = Vec::new();
     for (index, source) in source_results.iter().enumerate() {
+        emit_laundry_result_update(app, source_root, source, run_id, test_type, suite, "Staging result", 0, None);
         let suite_root = suite_root_for_laundry_result(root, suite, devices, source)?;
         let executable = tradefed_tool_for_suite(&suite_root, suite)?;
         if !executable.is_file() {
@@ -1064,29 +1177,255 @@ fn run_laundry_retries(
         emit_log(app, format!("[runner] {suite}: staging result {} -> {}", source.display(), target.display()));
         copy_dir_recursive(source, &target)
             .map_err(|err| format!("Cannot stage {} to {}: {err}", source.display(), target.display()))?;
+        cleanup_deviceinfo_backups(&target);
         if let Some(replacement) = replacement_deviceinfo {
             if let Some(target_info) = property_deviceinfo_in_result(&target) {
-                let backup = target_info.with_extension("deviceinfo.json.bak");
-                fs::copy(&target_info, &backup)
-                    .map_err(|err| format!("Cannot backup {}: {err}", target_info.display()))?;
                 fs::copy(replacement, &target_info)
                     .map_err(|err| format!("Cannot replace {}: {err}", target_info.display()))?;
-                emit_log(app, format!("[runner] {suite}: replaced {} backup={}", target_info.display(), backup.display()));
+                cleanup_deviceinfo_backups(&target);
+                emit_log(app, format!("[runner] {suite}: replaced {}", target_info.display()));
             } else {
                 emit_log(app, format!("[runner] {suite}: no PropertyDeviceInfo in {}; retrying NOT_EXECUTED without replace.", target.display()));
             }
         }
+        let session_id = resolve_retry_session_id(
+            app,
+            suite,
+            &executable,
+            target
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(&timestamp),
+            &log_dir.join(format!("laundry_list_{}_{}_{}devs.log", suite.to_lowercase(), index + 1, devices.len())),
+        )?;
         let cmd = format!(
-            "run retry --retry 0 --retry-type NOT_EXECUTED --shard-count {}{}",
+            "run retry --retry {session_id} --retry-type NOT_EXECUTED --shard-count {}{}",
             devices.len(),
             serial_args(devices)
         );
-        emit_log(app, format!("[runner] {suite}: retry command for {}", target.display()));
+        emit_log(app, format!("[runner] {suite}: retry session={session_id} result={}", target.display()));
         let log_file = log_dir.join(format!("laundry_retry_{}_{}_{}devs.log", suite.to_lowercase(), index + 1, devices.len()));
+        let copy_started = SystemTime::now();
+        emit_laundry_result_update(app, source_root, source, run_id, test_type, suite, "Running", 0, None);
         let outcome = run_suite_process(app, suite, devices, &executable, &suite_root, &cmd, suite != "STS", &log_file, timeout_secs, run_id, test_type, true)?;
+        copy_laundry_retry_artifact(app, session_dir, suite, &suite_root, &target, copy_started, model, pda, devices, index + 1)?;
+        let summary = parse_summary(&log_file, suite, &devices.join(","), run_id, test_type);
+        emit_laundry_result_update(
+            app,
+            source_root,
+            source,
+            run_id,
+            test_type,
+            suite,
+            if outcome.exit_code == 0 { "Test Done" } else { "Failed" },
+            outcome.elapsed_secs,
+            Some(&summary),
+        );
         codes.push(outcome.exit_code);
     }
     Ok(codes)
+}
+
+fn copy_laundry_retry_artifact(
+    app: &AppHandle,
+    session_dir: &Path,
+    suite: &str,
+    suite_root: &Path,
+    result_dir: &Path,
+    copy_started: SystemTime,
+    model: &str,
+    pda: &str,
+    devices: &[String],
+    index: usize,
+) -> Result<(), String> {
+    emit_log(app, format!("[runner] {suite}: copying retry artifact for {}", result_dir.display()));
+    let zip = latest_zip_since(&suite_root.join("results"), copy_started)
+        .or_else(|| first_zip(result_dir))
+        .or_else(|| {
+            let sibling = result_dir.with_extension("zip");
+            if sibling.is_file() { Some(sibling) } else { None }
+        });
+    let Some(zip) = zip else {
+        emit_log(app, format!("[{suite}] No zip found after retry in {}", result_dir.display()));
+        return Ok(());
+    };
+    let result_name = result_dir
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("result");
+    let dst = session_dir.join(format!(
+        "{}_retry{}_{}_{}_{}_{}.zip",
+        suite,
+        index,
+        sanitize_name(model),
+        sanitize_name(pda),
+        sanitize_name(&devices.join("_")),
+        sanitize_name(result_name)
+    ));
+    fs::copy(&zip, &dst)
+        .map_err(|err| format!("Cannot copy {} to {}: {err}", zip.display(), dst.display()))?;
+    emit_log(app, format!("[{suite}] Retry result copied: {}", dst.display()));
+    Ok(())
+}
+
+fn copy_latest_suite_zip_artifact(
+    app: &AppHandle,
+    session_dir: &Path,
+    suite: &str,
+    suite_root: &Path,
+    copy_started: SystemTime,
+    model: &str,
+    pda: &str,
+    devices: &[String],
+    label: &str,
+) -> Result<(), String> {
+    emit_log(app, format!("[runner] {suite}: copying latest artifact from {}", suite_root.join("results").display()));
+    let Some(zip) = latest_zip_since(&suite_root.join("results"), copy_started) else {
+        emit_log(app, format!("[{suite}] No new zip found in {}", suite_root.join("results").display()));
+        return Ok(());
+    };
+    let dst = session_dir.join(format!(
+        "{}_{}_{}_{}_{}.zip",
+        suite,
+        sanitize_name(label),
+        sanitize_name(model),
+        sanitize_name(pda),
+        sanitize_name(&devices.join("_"))
+    ));
+    fs::copy(&zip, &dst)
+        .map_err(|err| format!("Cannot copy {} to {}: {err}", zip.display(), dst.display()))?;
+    emit_log(app, format!("[{suite}] Result copied: {}", dst.display()));
+    Ok(())
+}
+
+fn resolve_retry_session_id(
+    app: &AppHandle,
+    suite: &str,
+    executable: &Path,
+    result_dir_name: &str,
+    log_file: &Path,
+) -> Result<String, String> {
+    emit_log(app, format!("[runner] {suite}: resolving retry session for {result_dir_name}"));
+    let mut last_output = String::new();
+    for attempt in 1..=5 {
+        let output = run_tradefed_console_command(app, suite, executable, "l r", log_file, 45)?;
+        if let Some(session_id) = parse_retry_session_id(&output, result_dir_name) {
+            emit_log(app, format!("[runner] {suite}: matched retry session {session_id} for {result_dir_name}"));
+            return Ok(session_id);
+        }
+        last_output = output;
+        emit_log(app, format!("[runner] {suite}: retry session not visible yet for {result_dir_name} (attempt {attempt}/5)."));
+        thread::sleep(Duration::from_secs(1));
+    }
+    Err(format!(
+        "{suite}: cannot find retry session for result directory {result_dir_name}. Check {}. Last l r output had {} bytes.",
+        log_file.display(),
+        last_output.len()
+    ))
+}
+
+fn parse_retry_session_id(output: &str, result_dir_name: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || !trimmed.contains(result_dir_name) {
+            return None;
+        }
+        let session = trimmed.split_whitespace().next()?;
+        if session.chars().all(|ch| ch.is_ascii_digit()) {
+            Some(session.to_string())
+        } else {
+            None
+        }
+    })
+}
+
+fn run_tradefed_console_command(
+    app: &AppHandle,
+    suite: &str,
+    executable: &Path,
+    console_command: &str,
+    log_file: &Path,
+    timeout_secs: u64,
+) -> Result<String, String> {
+    write_log_header(log_file, suite, console_command)?;
+    let executable_name = executable
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| format!("Invalid executable path: {}", executable.display()))?;
+    let executable_dir = executable
+        .parent()
+        .ok_or_else(|| format!("Invalid executable parent: {}", executable.display()))?;
+
+    let mut command = Command::new(format!("./{executable_name}"));
+    command
+        .current_dir(executable_dir)
+        .args(console_command.split_whitespace())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    configure_child(&mut command);
+
+    let mut child = command
+        .spawn()
+        .map_err(|err| format!("Failed to start {suite} console: {err}"))?;
+    let pid = child.id();
+    register_pid(app, pid);
+    emit_log(app, format!("[{suite}] console pid={pid} command={console_command}"));
+
+    let output = Arc::new(Mutex::new(String::new()));
+    if let Some(stdout) = child.stdout.take() {
+        let out_buf = Arc::clone(&output);
+        let log_stdout = log_file.to_path_buf();
+        let app_stdout = app.clone();
+        let suite_stdout = suite.to_string();
+        thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                append_file_line(&log_stdout, &line);
+                if let Ok(mut text) = out_buf.lock() {
+                    text.push_str(&line);
+                    text.push('\n');
+                }
+                let _ = app_stdout.emit("gba-run-log", format!("[{suite_stdout}] {line}"));
+            }
+        });
+    }
+    if let Some(stderr) = child.stderr.take() {
+        let out_buf = Arc::clone(&output);
+        let log_stderr = log_file.to_path_buf();
+        let app_stderr = app.clone();
+        let suite_stderr = suite.to_string();
+        thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                append_file_line(&log_stderr, &line);
+                if let Ok(mut text) = out_buf.lock() {
+                    text.push_str(&line);
+                    text.push('\n');
+                }
+                let _ = app_stderr.emit("gba-run-log", format!("[{suite_stderr}] {line}"));
+            }
+        });
+    }
+
+    let started = Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => break,
+            Ok(None) => {}
+            Err(err) => {
+                unregister_pid(app, pid);
+                return Err(format!("{suite} console wait failed: {err}"));
+            }
+        }
+        if started.elapsed().as_secs() > timeout_secs {
+            terminate_process_tree(child.id());
+            let _ = child.wait();
+            unregister_pid(app, pid);
+            return Err(format!("{suite} console command timed out: {console_command}"));
+        }
+        thread::sleep(Duration::from_millis(200));
+    }
+    unregister_pid(app, pid);
+    thread::sleep(Duration::from_millis(200));
+    Ok(output.lock().map(|text| text.clone()).unwrap_or_default())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1149,7 +1488,7 @@ fn run_cts_then_gts(
     }
     emit_log(app, format!("[runner] CTS: done; GTS: starting command '{gts_command}' on {}", devices.join(",")));
 
-    let gts_root = root.join("GTS/android-gts");
+    let gts_root = resolve_gts_root(root, "")?;
     let gts_exe = gts_root.join("tools/gts-tradefed");
     if !gts_exe.is_file() {
         return Err(format!("gts-tradefed not found: {}", gts_exe.display()));
@@ -1336,6 +1675,8 @@ fn wait_with_timeout(
     publish_status: bool,
 ) -> i32 {
     let started = Instant::now();
+    let mut disconnected_since: Option<Instant> = None;
+    let mut last_device_check = Instant::now() - Duration::from_secs(5);
     loop {
         match child.try_wait() {
             Ok(Some(status)) => return status.code().unwrap_or(1),
@@ -1350,6 +1691,56 @@ fn wait_with_timeout(
             terminate_process_tree(child.id());
             let _ = child.wait();
             return 0;
+        }
+        if last_device_check.elapsed().as_secs() >= 5 {
+            last_device_check = Instant::now();
+            let missing = disconnected_devices(devices);
+            if missing.is_empty() {
+                if disconnected_since.take().is_some() {
+                    emit_log(app, format!("[runner] {suite}: device reconnected; continuing monitor."));
+                    if publish_status {
+                        emit_status(
+                            app,
+                            suite,
+                            "Running",
+                            &devices.join(","),
+                            started.elapsed().as_secs(),
+                            log_file,
+                            run_id,
+                            test_type,
+                        );
+                    }
+                }
+            } else {
+                let since = disconnected_since.get_or_insert_with(Instant::now);
+                let waited = since.elapsed().as_secs();
+                emit_log(
+                    app,
+                    format!(
+                        "[runner] {suite}: waiting device reconnect ({}/{DEVICE_RECONNECT_TIMEOUT_SECS}s): {}",
+                        waited,
+                        missing.join(",")
+                    ),
+                );
+                if publish_status {
+                    emit_status(
+                        app,
+                        suite,
+                        "Waiting device reconnect",
+                        &devices.join(","),
+                        started.elapsed().as_secs(),
+                        log_file,
+                        run_id,
+                        test_type,
+                    );
+                }
+                if waited > DEVICE_RECONNECT_TIMEOUT_SECS {
+                    emit_log(app, format!("[runner] {suite}: reconnect timeout; terminating tradefed."));
+                    terminate_process_tree(child.id());
+                    let _ = child.wait();
+                    return 125;
+                }
+            }
         }
         if started.elapsed().as_secs() > timeout_secs {
             if publish_status {
@@ -1381,6 +1772,27 @@ fn wait_with_timeout(
         }
         thread::sleep(Duration::from_secs(1));
     }
+}
+
+fn disconnected_devices(devices: &[String]) -> Vec<String> {
+    devices
+        .iter()
+        .filter_map(|serial| match adb_device_state(serial) {
+            Ok(state) if state == "device" => None,
+            Ok(state) => Some(format!("{serial}:{state}")),
+            Err(err) => Some(format!("{serial}:{err}")),
+        })
+        .collect()
+}
+
+fn adb_device_state(serial: &str) -> Result<String, String> {
+    adb_device_output(serial, &["get-state"]).map(|state| {
+        if state.trim().is_empty() {
+            "unknown".to_string()
+        } else {
+            state.trim().to_string()
+        }
+    })
 }
 
 fn suite_log_has_completion_marker(log_file: &Path) -> bool {
@@ -1473,7 +1885,7 @@ fn suite_root_for_copy(root: &Path, suite: &str, devices: &[String]) -> Result<P
     let android = android_major(&prop(&props, "ro.build.version.release"));
     match suite {
         "CTS" => resolve_cts_root(root, &android),
-        "GTS" => Ok(root.join("GTS/android-gts")),
+        "GTS" => resolve_gts_root(root, ""),
         "STS" => {
             let spl = prop(&props, "ro.build.version.security_patch");
             Ok(root
@@ -1491,59 +1903,71 @@ fn suite_root_for_laundry_result(root: &Path, suite: &str, devices: &[String], r
         if let Some(version) = cts_version_from_result(result_dir) {
             return resolve_cts_root(root, &version);
         }
+    } else if suite == "GTS" {
+        if let Some(version) = suite_version_from_result(result_dir) {
+            return resolve_gts_root(root, &version);
+        }
     }
     suite_root_for_copy(root, suite, devices)
 }
 
 fn resolve_cts_root(root: &Path, version_hint: &str) -> Result<PathBuf, String> {
+    resolve_versioned_suite_root(root, "CTS", "android-cts", version_hint)
+}
+
+fn resolve_gts_root(root: &Path, version_hint: &str) -> Result<PathBuf, String> {
+    resolve_versioned_suite_root(root, "GTS", "android-gts", version_hint)
+}
+
+fn resolve_versioned_suite_root(root: &Path, suite: &str, suite_dir: &str, version_hint: &str) -> Result<PathBuf, String> {
     let hint = version_hint.trim();
-    let cts_base = root.join("CTS");
-    if hint.is_empty() {
-        return Err("CTS version hint is empty".to_string());
+    let base = root.join(suite);
+
+    if !hint.is_empty() {
+        let exact = base.join(hint).join(suite_dir);
+        if exact.is_dir() {
+            return Ok(exact);
+        }
     }
 
-    let exact = cts_base.join(hint).join("android-cts");
-    if exact.is_dir() {
-        return Ok(exact);
-    }
-
-    let candidates = available_cts_versions(root)
+    let candidates = available_suite_versions(root, suite, suite_dir)
         .into_iter()
-        .filter(|version| cts_version_matches_hint(version, hint))
+        .filter(|version| hint.is_empty() || suite_version_matches_hint(version, hint))
         .collect::<Vec<_>>();
-    if let Some(best) = candidates.into_iter().min_by_key(|version| cts_version_rank(version)) {
-        let path = cts_base.join(&best).join("android-cts");
+    if let Some(best) = candidates.into_iter().min_by_key(|version| suite_version_rank(version)) {
+        let path = base.join(&best).join(suite_dir);
         if path.is_dir() {
             return Ok(path);
         }
     }
 
     Err(format!(
-        "CTS tools for version {hint} not found under {}",
-        cts_base.display()
+        "{suite} tools for version {} not found under {}",
+        if hint.is_empty() { "<default>" } else { hint },
+        base.display()
     ))
 }
 
-fn available_cts_versions(root: &Path) -> Vec<String> {
-    let cts_base = root.join("CTS");
-    let mut versions = fs::read_dir(cts_base)
+fn available_suite_versions(root: &Path, suite: &str, suite_dir: &str) -> Vec<String> {
+    let base = root.join(suite);
+    let mut versions = fs::read_dir(base)
         .ok()
         .into_iter()
         .flat_map(|entries| entries.flatten())
         .filter_map(|entry| {
             let path = entry.path();
-            if path.join("android-cts").is_dir() {
+            if path.join(suite_dir).is_dir() {
                 entry.file_name().to_str().map(|value| value.to_string())
             } else {
                 None
             }
         })
         .collect::<Vec<_>>();
-    versions.sort_by_key(|version| cts_version_rank(version));
+    versions.sort_by_key(|version| suite_version_rank(version));
     versions
 }
 
-fn cts_version_matches_hint(version: &str, hint: &str) -> bool {
+fn suite_version_matches_hint(version: &str, hint: &str) -> bool {
     if version == hint {
         return true;
     }
@@ -1555,7 +1979,7 @@ fn cts_version_matches_hint(version: &str, hint: &str) -> bool {
         .is_some_and(|rest| rest.starts_with("_r"))
 }
 
-fn cts_version_rank(version: &str) -> (u32, u32, u32) {
+fn suite_version_rank(version: &str) -> (u32, u32, u32) {
     let (base, revision) = version.split_once("_r").unwrap_or((version, "0"));
     let mut base_parts = base.split('.');
     let major = base_parts.next().and_then(|part| part.parse::<u32>().ok()).unwrap_or(0);
@@ -1575,10 +1999,15 @@ fn tradefed_tool_for_suite(suite_root: &Path, suite: &str) -> Result<PathBuf, St
 
 fn cts_version_from_result(result_dir: &Path) -> Option<String> {
     let (_, version, _) = get_suite_info_from_xml(&result_dir.join("test_result.xml"))?;
-    cts_version_from_suite_version(&version)
+    suite_version_from_result_version(&version)
 }
 
-fn cts_version_from_suite_version(version: &str) -> Option<String> {
+fn suite_version_from_result(result_dir: &Path) -> Option<String> {
+    let (_, version, _) = get_suite_info_from_xml(&result_dir.join("test_result.xml"))?;
+    suite_version_from_result_version(&version)
+}
+
+fn suite_version_from_result_version(version: &str) -> Option<String> {
     let clean = version.trim();
     if clean.is_empty() {
         return None;
@@ -1773,6 +2202,124 @@ fn scan_laundry_results(root: &Path) -> (Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf
     (cts, gts, sts)
 }
 
+fn scan_laundry_result_infos(root: &Path) -> Result<Vec<LaundryResultInfo>, String> {
+    let mut rows = Vec::new();
+    for entry in WalkDir::new(root).into_iter().flatten() {
+        if !entry.file_type().is_file() || entry.file_name() != "test_result.xml" {
+            continue;
+        }
+        let Some(result_dir) = entry.path().parent() else {
+            continue;
+        };
+        if let Some(info) = parse_laundry_result_info(root, result_dir, entry.path())? {
+            rows.push(info);
+        }
+    }
+    Ok(rows)
+}
+
+fn parse_laundry_result_info(root: &Path, result_dir: &Path, xml_path: &Path) -> Result<Option<LaundryResultInfo>, String> {
+    let file = fs::File::open(xml_path).map_err(|err| format!("Cannot open {}: {err}", xml_path.display()))?;
+    let reader = BufReader::new(file);
+    let mut suite_name = String::new();
+    let mut suite_version = String::new();
+    let mut command_line_args = String::new();
+    let mut start_ms = None;
+    let mut end_ms = None;
+    let mut passed = 0;
+    let mut failed = 0;
+    let mut saw_result = false;
+
+    for line_result in reader.lines() {
+        let line = line_result.map_err(|err| format!("Cannot read {}: {err}", xml_path.display()))?;
+        if line.contains("<Result ") {
+            saw_result = true;
+            suite_name = parse_xml_attribute(&line, "suite_name").unwrap_or_default();
+            suite_version = parse_xml_attribute(&line, "suite_version").unwrap_or_default();
+            command_line_args = parse_xml_attribute(&line, "command_line_args").unwrap_or_default();
+            start_ms = parse_xml_attribute(&line, "start").and_then(|value| value.parse::<u64>().ok());
+            end_ms = parse_xml_attribute(&line, "end").and_then(|value| value.parse::<u64>().ok());
+        } else if line.contains("<Summary ") {
+            passed = parse_xml_attribute(&line, "pass")
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(0);
+            failed = parse_xml_attribute(&line, "failed")
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(0);
+        }
+    }
+
+    if !saw_result {
+        return Ok(None);
+    }
+
+    let suite = classify_suite(&suite_name)
+        .or_else(|| suite_hint_from_path(result_dir))
+        .unwrap_or_else(|| "UNKNOWN".to_string());
+    if suite == "UNKNOWN" {
+        return Ok(None);
+    }
+
+    let result_name = result_dir
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| suite.clone());
+    let relative = laundry_result_id(root, result_dir);
+    Ok(Some(LaundryResultInfo {
+        id: relative.clone(),
+        suite: suite.clone(),
+        testcase: format!("{suite} {result_name}"),
+        subtestcases: if command_line_args.trim().is_empty() {
+            "-"
+        } else {
+            command_line_args.trim()
+        }
+        .to_string(),
+        status: "Ready".to_string(),
+        time: format_xml_duration(start_ms, end_ms),
+        total: passed + failed,
+        passed,
+        failed,
+        suite_version,
+        result_dir: relative,
+    }))
+}
+
+fn classify_suite(name: &str) -> Option<String> {
+    let lower = name.to_lowercase();
+    if lower.contains("cts") || lower.contains("compatibility") {
+        Some("CTS".to_string())
+    } else if lower.contains("gts") || lower.contains("google") {
+        Some("GTS".to_string())
+    } else if lower.contains("sts") || lower.contains("security") {
+        Some("STS".to_string())
+    } else {
+        None
+    }
+}
+
+fn laundry_result_id(root: &Path, result_dir: &Path) -> String {
+    let path = result_dir.strip_prefix(root).unwrap_or(result_dir);
+    path.components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
+fn format_xml_duration(start_ms: Option<u64>, end_ms: Option<u64>) -> String {
+    match (start_ms, end_ms) {
+        (Some(start), Some(end)) if end >= start => format_duration_hms((end - start) / 1000),
+        _ => "-".to_string(),
+    }
+}
+
+fn format_duration_hms(total: u64) -> String {
+    let h = total / 3600;
+    let m = (total % 3600) / 60;
+    let s = total % 60;
+    format!("{h:02}:{m:02}:{s:02}")
+}
+
 fn suite_hint_from_path(path: &Path) -> Option<String> {
     let text = path.display().to_string().to_lowercase();
     if text.contains("cts") {
@@ -1818,6 +2365,18 @@ fn latest_property_deviceinfo(results_dir: &Path) -> Option<PathBuf> {
         })
         .max_by_key(|(modified, _)| *modified)
         .map(|(_, path)| path)
+}
+
+fn cleanup_deviceinfo_backups(result_dir: &Path) {
+    for entry in WalkDir::new(result_dir).into_iter().flatten() {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy();
+        if name.contains("PropertyDeviceInfo") && name.ends_with(".bak") {
+            let _ = fs::remove_file(entry.path());
+        }
+    }
 }
 
 fn generate_ro_xml_file(serial: &str, dir: &Path) -> Result<String, String> {
@@ -2015,6 +2574,60 @@ fn emit_status(
             devices: devices.to_string(),
             elapsed_secs,
             log_file: log_file.display().to_string(),
+        },
+    );
+}
+
+fn emit_laundry_result_updates(
+    app: &AppHandle,
+    source_root: &Path,
+    source_results: &[PathBuf],
+    run_id: &str,
+    test_type: &str,
+    suite: &str,
+    status: &str,
+    elapsed_secs: u64,
+    summary: Option<&SuiteSummary>,
+) {
+    for source in source_results {
+        emit_laundry_result_update(
+            app,
+            source_root,
+            source,
+            run_id,
+            test_type,
+            suite,
+            status,
+            elapsed_secs,
+            summary,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_laundry_result_update(
+    app: &AppHandle,
+    source_root: &Path,
+    source_result: &Path,
+    run_id: &str,
+    test_type: &str,
+    suite: &str,
+    status: &str,
+    elapsed_secs: u64,
+    summary: Option<&SuiteSummary>,
+) {
+    let _ = app.emit(
+        "gba-laundry-result-update",
+        LaundryResultUpdate {
+            run_id: run_id.to_string(),
+            test_type: test_type.to_string(),
+            id: laundry_result_id(source_root, source_result),
+            suite: suite.to_string(),
+            status: status.to_string(),
+            time: if elapsed_secs > 0 { format_duration(elapsed_secs) } else { "-".to_string() },
+            total: summary.map(|value| value.total).unwrap_or(0),
+            passed: summary.map(|value| value.passed).unwrap_or(0),
+            failed: summary.map(|value| value.failed).unwrap_or(0),
         },
     );
 }
@@ -2303,12 +2916,37 @@ fn first_zip(dir: &Path) -> Option<PathBuf> {
             let item = entry.path();
             if item.is_dir() {
                 stack.push(item);
-            } else if item.extension().is_some_and(|ext| ext == "zip") {
+            } else if is_zip_file(&item) {
                 return Some(item);
             }
         }
     }
     None
+}
+
+fn latest_zip_since(dir: &Path, since: SystemTime) -> Option<PathBuf> {
+    let threshold = since.checked_sub(Duration::from_secs(3)).unwrap_or(since);
+    let mut newest: Option<(SystemTime, PathBuf)> = None;
+    for entry in WalkDir::new(dir).into_iter().flatten() {
+        if !entry.file_type().is_file() || !is_zip_file(entry.path()) {
+            continue;
+        }
+        let modified = fs::metadata(entry.path()).and_then(|metadata| metadata.modified()).ok()?;
+        if modified < threshold {
+            continue;
+        }
+        match newest.as_ref() {
+            Some((current, _)) if modified <= *current => {}
+            _ => newest = Some((modified, entry.path().to_path_buf())),
+        }
+    }
+    newest.map(|(_, path)| path)
+}
+
+fn is_zip_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|ext| ext.to_str())
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("zip"))
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), std::io::Error> {
@@ -2538,6 +3176,7 @@ fn main() {
             set_device_lamp,
             open_scrcpy,
             open_result,
+            analyze_laundry_zip,
             generate_ro_xml
         ])
         .run(tauri::generate_context!())
