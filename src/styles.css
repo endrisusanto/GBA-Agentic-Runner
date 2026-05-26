@@ -64,7 +64,7 @@ input {
 
 .splash strong {
   font-size: 18px;
-  color: var(--green);
+  color: var(--white);
 }
 
 @keyframes splash-out {

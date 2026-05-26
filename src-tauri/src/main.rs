@@ -1433,6 +1433,34 @@ fn suite_root_for_copy(root: &Path, suite: &str, devices: &[String]) -> Result<P
     }
 }
 
+fn parse_xml_attribute(line: &str, attr: &str) -> Option<String> {
+    for quote in ['"', '\''] {
+        let pattern = format!("{}={}", attr, quote);
+        if let Some(start_idx) = line.find(&pattern) {
+            let val_start = start_idx + pattern.len();
+            if let Some(end_idx) = line[val_start..].find(quote) {
+                return Some(line[val_start..val_start + end_idx].to_string());
+            }
+        }
+    }
+    None
+}
+
+fn get_suite_info_from_xml(xml_path: &Path) -> Option<(String, String, String)> {
+    let file = fs::File::open(xml_path).ok()?;
+    let reader = BufReader::new(file);
+    for line_result in reader.lines().take(50) {
+        let line = line_result.ok()?;
+        if line.contains("<Result ") {
+            let name = parse_xml_attribute(&line, "suite_name").unwrap_or_default();
+            let version = parse_xml_attribute(&line, "suite_version").unwrap_or_default();
+            let build = parse_xml_attribute(&line, "suite_build_number").unwrap_or_default();
+            return Some((name, version, build));
+        }
+    }
+    None
+}
+
 fn verify_laundry_suite_tools(
     app: &AppHandle,
     root: &Path,
@@ -1465,6 +1493,50 @@ fn verify_laundry_suite_tools(
             ));
         }
         emit_log(app, format!("[preflight] {suite}: tool ready {}", tool.display()));
+
+        let version_txt = suite_root.join("tools/version.txt");
+        let local_version = if version_txt.is_file() {
+            fs::read_to_string(&version_txt)
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+
+        let result_dirs = match *suite {
+            "CTS" => &source.cts_results,
+            "GTS" => &source.gts_results,
+            "STS" => &source.sts_results,
+            _ => continue,
+        };
+
+        for dir in result_dirs {
+            let xml_path = dir.join("test_result.xml");
+            if xml_path.is_file() {
+                if let Some((name, version, build)) = get_suite_info_from_xml(&xml_path) {
+                    if !local_version.is_empty() && !build.is_empty() && build != local_version {
+                        return Err(format!(
+                            "Mismatched tools version for {suite}:\n\
+                             Laundry file has version: {name} {version} ({build})\n\
+                             Local tool has version: ({local_version})\n\
+                             Please align laundry file and local tools.",
+                            suite = suite,
+                            name = name,
+                            version = version,
+                            build = build,
+                            local_version = local_version
+                        ));
+                    }
+                    emit_log(
+                        app,
+                        format!(
+                            "[preflight] {suite}: version checked and matched (laundry: {} {} / {}, local tool: {})",
+                            name, version, build, local_version
+                        ),
+                    );
+                }
+            }
+        }
     }
     Ok(())
 }
