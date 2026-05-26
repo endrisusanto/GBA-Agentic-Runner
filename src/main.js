@@ -6,11 +6,20 @@ import agenticLogo from "./assets/agentic.png";
 
 const TEST_MODES = [
   {
-    id: "Cuci SMR",
-    name: "Cuci SMR",
-    flow: "CTS SMR -> GTS SMR",
-    description: "Non-userdebug build approval wash run.",
+    id: "Laundry SMR",
+    name: "Laundry SMR",
+    flow: "GTS gtsmr -> CTS filters -> GTS retry / STS retry",
+    description: "Laundry SMR with deviceinfo replacement and retry.",
+    needs: "both",
+    laundry: true,
+  },
+  {
+    id: "Laundry Normal",
+    name: "Laundry Normal",
+    flow: "GTS property -> CTS/GTS retry",
+    description: "Laundry Normal with property deviceinfo replacement.",
     needs: "user",
+    laundry: true,
   },
   {
     id: "MR",
@@ -53,11 +62,15 @@ const state = {
   timeoutSecs: Number(localStorage.getItem("autoTestTimeout") || "86400"),
   devices: [],
   selected: new Set(),
-  selectedMode: "Cuci SMR",
+  selectedMode: "Laundry SMR",
+  laundryZipPath: "",
+  lampStates: new Map(),
   running: false,
-  logTabs: new Map(),
-  activeLogTab: "",
-  activeRunLogKeys: new Set(),
+  activeRuns: new Set(),
+  flows: new Map(),
+  logFlows: new Map(),
+  activeLogFlow: "",
+  activeLogSubtab: "Runner",
   suiteStatuses: new Map(),
   summaries: new Map(),
   resultDir: "",
@@ -81,7 +94,12 @@ app.innerHTML = `
           <p>CTS, GTS, and STS automation console</p>
         </div>
       </div>
-      <button class="icon-button" id="settingsBtn" title="Settings">⚙</button>
+      <button class="icon-button settings-button" id="settingsBtn" title="Settings" aria-label="Settings">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"></path>
+          <path d="M19.4 15a1.8 1.8 0 0 0 .36 1.98l.04.04a2 2 0 0 1-2.82 2.82l-.04-.04A1.8 1.8 0 0 0 15 19.44a1.8 1.8 0 0 0-1 .56 1.8 1.8 0 0 0-.52 1.28V21.4a2 2 0 0 1-4 0v-.08A1.8 1.8 0 0 0 8 19.44a1.8 1.8 0 0 0-1.98.36l-.04.04a2 2 0 0 1-2.82-2.82l.04-.04A1.8 1.8 0 0 0 3.56 15a1.8 1.8 0 0 0-.56-1 1.8 1.8 0 0 0-1.28-.52H1.6a2 2 0 0 1 0-4h.08A1.8 1.8 0 0 0 3.56 8a1.8 1.8 0 0 0-.36-1.98l-.04-.04a2 2 0 0 1 2.82-2.82l.04.04A1.8 1.8 0 0 0 8 3.56a1.8 1.8 0 0 0 1-.56 1.8 1.8 0 0 0 .52-1.28V1.6a2 2 0 0 1 4 0v.08A1.8 1.8 0 0 0 15 3.56a1.8 1.8 0 0 0 1.98-.36l.04-.04a2 2 0 0 1 2.82 2.82l-.04.04A1.8 1.8 0 0 0 19.44 8a1.8 1.8 0 0 0 .56 1 1.8 1.8 0 0 0 1.28.52h.12a2 2 0 0 1 0 4h-.08A1.8 1.8 0 0 0 19.4 15Z"></path>
+        </svg>
+      </button>
     </header>
 
     <aside class="devices-pane">
@@ -89,6 +107,7 @@ app.innerHTML = `
         <h2>DEVICES</h2>
         <div class="pane-actions">
           <button class="mini-button" id="unselectBtn">Select</button>
+          <button class="mini-button warn" id="resetBusyBtn">Reset Busy</button>
           <button class="mini-button" id="refreshBtn">Refresh</button>
         </div>
       </div>
@@ -109,11 +128,17 @@ app.innerHTML = `
 
       <section class="test-area" id="testArea"></section>
 
+      <section class="flow-map" id="flowMap"></section>
+
       <section class="running-log">
         <div class="log-head">
-          <h2>RUNNING LOG</h2>
-          <div class="log-tabs" id="logTabs"></div>
-          <button id="clearLogBtn">[ Clear Log ]</button>
+          <div class="log-tab-stack">
+            <div class="log-tabs">
+              <div class="log-flow-tabs" id="logFlowTabs"></div>
+              <button class="log-clear-button" id="clearLogBtn">Clear Log</button>
+            </div>
+            <div class="log-subtabs" id="logSubtabs"></div>
+          </div>
         </div>
         <pre id="logBox"></pre>
       </section>
@@ -177,13 +202,16 @@ app.innerHTML = `
 const els = {
   deviceList: document.querySelector("#deviceList"),
   testArea: document.querySelector("#testArea"),
+  flowMap: document.querySelector("#flowMap"),
   logBox: document.querySelector("#logBox"),
-  logTabs: document.querySelector("#logTabs"),
+  logFlowTabs: document.querySelector("#logFlowTabs"),
+  logSubtabs: document.querySelector("#logSubtabs"),
   runBtn: document.querySelector("#runBtn"),
   cancelBtn: document.querySelector("#cancelBtn"),
   openResultBtn: document.querySelector("#openResultBtn"),
   resultPill: document.querySelector("#resultPill"),
   unselectBtn: document.querySelector("#unselectBtn"),
+  resetBusyBtn: document.querySelector("#resetBusyBtn"),
   refreshBtn: document.querySelector("#refreshBtn"),
   settingsBtn: document.querySelector("#settingsBtn"),
   settingsModal: document.querySelector("#settingsModal"),
@@ -216,6 +244,7 @@ els.timeoutInput.value = state.timeoutSecs;
 els.wifiInput.checked = state.wifi.enabled;
 
 els.refreshBtn.addEventListener("click", refreshDevices);
+els.resetBusyBtn.addEventListener("click", resetBusyState);
 els.clearLogBtn.addEventListener("click", () => {
   clearInactiveLogTabs();
   renderLog();
@@ -240,31 +269,43 @@ els.wifiInput.addEventListener("change", () => {
   state.wifi.enabled = els.wifiInput.checked;
   localStorage.setItem("autoWifiAutoConnect", String(state.wifi.enabled));
 });
+document.addEventListener("keydown", (event) => {
+  if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "b") {
+    event.preventDefault();
+    resetBusyState();
+  }
+});
 
 listen("gba-run-log", (event) => appendLog(String(event.payload || "")));
 listen("gba-suite-status", (event) => {
   const payload = event.payload || {};
-  state.suiteStatuses.set(`${payload.suite}:${payload.devices || ""}`, payload);
+  ensureFlow(payload.run_id, payload.test_type, payload.devices);
+  state.suiteStatuses.set(`${payload.run_id || "legacy"}:${payload.suite}:${payload.devices || ""}`, payload);
+  renderFlowMap();
   renderSuiteStatus();
   renderMetrics();
 });
 listen("gba-summary", (event) => {
   const payload = event.payload || {};
-  state.summaries.set(`${payload.suite}:${payload.devices || ""}`, payload);
+  ensureFlow(payload.run_id, payload.test_type, payload.devices);
+  state.summaries.set(`${payload.run_id || "legacy"}:${payload.suite}:${payload.devices || ""}`, payload);
+  renderFlowMap();
   renderSuiteStatus();
   renderMetrics();
 });
 listen("gba-run-finished", (event) => {
   const payload = event.payload || {};
-  state.running = false;
+  if (payload.run_id) state.activeRuns.delete(payload.run_id);
+  state.running = state.activeRuns.size > 0;
   state.resultDir = payload.result_dir || state.resultDir;
   els.runBtn.disabled = false;
-  els.cancelBtn.disabled = true;
+  els.cancelBtn.disabled = state.activeRuns.size === 0;
   els.openResultBtn.disabled = !state.resultDir;
   els.resultPill.disabled = !state.resultDir;
   els.resultPill.textContent = state.resultDir ? "Open" : "None";
   els.statusLine.textContent = payload.exit_code === 0 ? "Completed" : "Finished with issue";
   appendLog(`[runner] Finished exit=${payload.exit_code} result=${state.resultDir || "N/A"}`);
+  renderFlowMap();
   renderMetrics();
   refreshDevices();
 });
@@ -322,6 +363,7 @@ async function refreshDevices() {
 function render() {
   renderDevices();
   renderTestArea();
+  renderFlowMap();
   renderLog();
   renderSuiteStatus();
   renderMetrics();
@@ -340,15 +382,21 @@ function renderDevices() {
     const ready = device.state === "device" && !device.busy;
     const selected = state.selected.has(device.serial);
     const badge = device.busy ? "BUSY" : (device.is_userdebug ? "USERDEBUG" : "USER");
+    const lampActive = state.lampStates.get(device.serial);
     return `
-      <button class="device-card ${selected ? "selected" : ""} ${ready ? "" : "disabled"} ${device.busy ? "busy" : ""}" data-serial="${escapeHtml(device.serial)}" ${ready ? "" : "disabled"}>
+      <article class="device-card ${selected ? "selected" : ""} ${ready ? "" : "disabled"} ${device.busy ? "busy" : ""}" data-serial="${escapeHtml(device.serial)}" role="button" tabindex="${ready ? "0" : "-1"}">
         <div class="device-top">
           <span class="check-dot ${selected ? "checked" : ""}">${selected ? "✓" : ""}</span>
           <div>
             <strong>${escapeHtml(device.model || device.serial)}</strong>
-            <p><b>${escapeHtml(device.serial)}</b> <span>${escapeHtml(device.busy ? device.busy_reason : device.state)}</span></p>
+            <p><b>${escapeHtml(device.serial)}</b> <span>${escapeHtml(device.state)}</span></p>
           </div>
           <span class="type-pill ${device.busy ? "busy" : (device.is_userdebug ? "debug" : "")}">${badge}</span>
+        </div>
+        <div class="device-actions">
+          <span class="busy-note">${escapeHtml(device.busy ? device.busy_reason : "")}</span>
+          <button class="icon-mini lamp-button ${lampActive ? "active" : ""}" data-lamp="${escapeHtml(device.serial)}" ${device.state === "device" ? "" : "disabled"} title="Toggle lamp">🌩️</button>
+          <button class="icon-mini scrcpy-button" data-scrcpy="${escapeHtml(device.serial)}" ${device.state === "device" ? "" : "disabled"} title="Open scrcpy">📱</button>
         </div>
         <div class="device-meta">
           <span><small>ANDROID</small>${escapeHtml(device.android || "-")}</span>
@@ -358,16 +406,34 @@ function renderDevices() {
           <span><small>CP</small>${escapeHtml(device.cp || "-")}</span>
           <span><small>CSC</small>${escapeHtml(device.csc || device.sales_code || "-")}</span>
         </div>
-      </button>
+      </article>
     `;
   }).join("");
 
   els.deviceList.querySelectorAll(".device-card").forEach((card) => {
     card.addEventListener("click", () => {
+      if (card.classList.contains("disabled")) return;
       const serial = card.dataset.serial;
       if (state.selected.has(serial)) state.selected.delete(serial);
       else state.selected.add(serial);
       render();
+    });
+    card.addEventListener("keydown", (event) => {
+      if (event.key !== "Enter" && event.key !== " ") return;
+      event.preventDefault();
+      card.click();
+    });
+  });
+  els.deviceList.querySelectorAll("[data-lamp]").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      await toggleLamp(button.dataset.lamp);
+    });
+  });
+  els.deviceList.querySelectorAll("[data-scrcpy]").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      event.stopPropagation();
+      await openScrcpy(button.dataset.scrcpy);
     });
   });
 }
@@ -375,27 +441,20 @@ function renderDevices() {
 function renderTestArea() {
   els.testArea.innerHTML = TEST_MODES.map((mode) => {
     const selected = state.selectedMode === mode.id;
-    const requirement = requirementText(mode);
     return `
       <button class="mode-card ${selected ? "selected" : ""}" data-mode="${escapeHtml(mode.id)}">
-        <header>
-          <div>
-            <h3>${escapeHtml(mode.name)}</h3>
-            <p>${escapeHtml(mode.description)}</p>
-          </div>
-          <span>${escapeHtml(mode.flow)}</span>
-        </header>
-        <div class="mode-foot">
-          <strong>${escapeHtml(requirement)}</strong>
-          <span>${selected ? "SELECTED" : "READY"}</span>
-        </div>
+        <strong>${escapeHtml(mode.name)}</strong>
+        <span>${escapeHtml(mode.flow)}</span>
       </button>
     `;
   }).join("");
 
   els.testArea.querySelectorAll(".mode-card").forEach((card) => {
-    card.addEventListener("click", () => {
+    card.addEventListener("click", async () => {
       state.selectedMode = card.dataset.mode;
+      if (isLaundryMode(state.selectedMode)) {
+        await chooseLaundryZip();
+      }
       renderTestArea();
     });
   });
@@ -403,26 +462,127 @@ function renderTestArea() {
 
 function renderLog() {
   renderLogTabs();
-  const tab = state.logTabs.get(state.activeLogTab);
+  const flow = state.logFlows.get(state.activeLogFlow);
+  const tab = flow?.tabs?.get(state.activeLogSubtab);
   els.logBox.textContent = (tab?.lines || []).slice(-600).join("\n");
   els.logBox.scrollTop = els.logBox.scrollHeight;
 }
 
 function renderLogTabs() {
-  if (!state.logTabs.size) {
-    ensureLogTab("runner:boot", "Runner", "Boot");
+  if (!state.logFlows.size) {
+    createBootLogFlow();
   }
-  els.logTabs.innerHTML = [...state.logTabs.values()].map((tab) => `
-    <button class="log-tab ${tab.key === state.activeLogTab ? "active" : ""}" data-key="${escapeHtml(tab.key)}" title="${escapeHtml(tab.title)}">
-      ${escapeHtml(tab.title)}
+  els.logFlowTabs.innerHTML = [...state.logFlows.values()].map((flow) => `
+    <button class="log-tab ${flow.id === state.activeLogFlow ? "active" : ""}" data-flow="${escapeHtml(flow.id)}" title="${escapeHtml(flow.title)}">
+      ${escapeHtml(flow.title)}
     </button>
   `).join("");
-  els.logTabs.querySelectorAll(".log-tab").forEach((button) => {
+  els.logFlowTabs.querySelectorAll(".log-tab").forEach((button) => {
     button.addEventListener("click", () => {
-      state.activeLogTab = button.dataset.key;
+      state.activeLogFlow = button.dataset.flow;
+      const flow = state.logFlows.get(state.activeLogFlow);
+      if (flow && !flow.tabs.has(state.activeLogSubtab)) state.activeLogSubtab = "Runner";
       renderLog();
     });
   });
+
+  const flow = state.logFlows.get(state.activeLogFlow);
+  const subtabs = flow ? [...flow.tabs.keys()] : [];
+  els.logSubtabs.innerHTML = subtabs.map((name) => `
+    <button class="log-subtab ${name === state.activeLogSubtab ? "active" : ""}" data-subtab="${escapeHtml(name)}">${escapeHtml(name)}</button>
+  `).join("");
+  els.logSubtabs.querySelectorAll(".log-subtab").forEach((button) => {
+    button.addEventListener("click", () => {
+      state.activeLogSubtab = button.dataset.subtab;
+      renderLog();
+    });
+  });
+}
+
+function renderFlowMap() {
+  const runIds = [...state.flows.keys()].filter((runId) => runId !== "boot");
+  if (!runIds.length) {
+    const mode = TEST_MODES.find((item) => item.id === state.selectedMode);
+    els.flowMap.innerHTML = `
+      <div class="flow-map-empty">
+        <strong>${escapeHtml(mode?.name || "Flow")}</strong>
+        <span>${escapeHtml(mode?.flow || "Select devices and run")}</span>
+      </div>
+    `;
+    return;
+  }
+
+  els.flowMap.innerHTML = runIds.slice(-4).reverse().map((runId) => {
+    const flow = state.flows.get(runId);
+    const nodes = flowNodes(flow?.mode || "");
+    const runStatuses = [...state.suiteStatuses.values()].filter((status) => (status.run_id || "legacy") === runId);
+    const active = state.activeRuns.has(runId);
+    const body = nodes.map((node, index) => {
+      const status = nodeStatus(node, runStatuses, index, nodes);
+      return `
+        <div class="flow-node ${status.className}">
+          <span class="node-dot">${index + 1}</span>
+          <div>
+            <strong>${escapeHtml(node.label)}</strong>
+            <small>${escapeHtml(status.text)}</small>
+          </div>
+        </div>
+      `;
+    }).join(`<div class="flow-edge"></div>`);
+    return `
+      <article class="flow-map-card ${active ? "active" : ""}">
+        <header>
+          <div>
+            <strong>${escapeHtml(flow?.mode || "Run")}</strong>
+            <span>${escapeHtml(flow?.devices || "-")}</span>
+          </div>
+          <em>${active ? "RUNNING" : "DONE"}</em>
+        </header>
+        <div class="flow-node-row">${body}</div>
+      </article>
+    `;
+  }).join("");
+}
+
+function flowNodes(modeName) {
+  if (modeName === "Laundry Normal") {
+    return [
+      { label: "GTS property", suites: ["GTS"] },
+      { label: "DeviceInfo", suites: ["GTS"], text: "replace" },
+      { label: "CTS retry", suites: ["CTS"] },
+      { label: "GTS retry", suites: ["GTS"] },
+    ];
+  }
+  if (modeName === "Laundry SMR") {
+    return [
+      { label: "GTS gtsmr", suites: ["GTS"] },
+      { label: "CTS filters", suites: ["CTS"] },
+      { label: "GTS retry", suites: ["GTS"] },
+      { label: "STS retry", suites: ["STS"] },
+    ];
+  }
+  if (modeName === "STS") return [{ label: "STS", suites: ["STS"] }];
+  if (modeName === "SMR") return [{ label: "CTS", suites: ["CTS"] }, { label: "GTS", suites: ["GTS"] }, { label: "STS", suites: ["STS"] }];
+  return [{ label: "CTS", suites: ["CTS"] }, { label: "GTS", suites: ["GTS"] }];
+}
+
+function nodeStatus(node, statuses, index, nodes) {
+  const matches = statuses.filter((status) => node.suites.includes(status.suite));
+  if (matches.some((status) => ["Failed", "Timeout", "Cancelled"].includes(status.status))) {
+    return { className: "failed", text: matches.find((status) => ["Failed", "Timeout", "Cancelled"].includes(status.status))?.status || "Failed" };
+  }
+  if (matches.some((status) => status.status === "Test Done" || status.status === "Completed")) {
+    return { className: "done", text: node.text || "done" };
+  }
+  if (matches.some((status) => ["Starting", "Running", "Copying result"].includes(status.status))) {
+    const status = matches.find((item) => ["Starting", "Running", "Copying result"].includes(item.status));
+    return { className: "running", text: status?.status || "running" };
+  }
+  const previousDone = nodes.slice(0, index).every((prev) => {
+    const prevMatches = statuses.filter((status) => prev.suites.includes(status.suite));
+    return prevMatches.some((status) => status.status === "Test Done" || status.status === "Completed");
+  });
+  return { className: previousDone && statuses.length ? "queued" : "idle", text: previousDone && statuses.length ? "queued" : "standby" };
 }
 
 function renderSuiteStatus() {
@@ -431,19 +591,47 @@ function renderSuiteStatus() {
     els.suiteList.innerHTML = `<div class="empty">No active suite.</div>`;
     return;
   }
-  els.suiteList.innerHTML = statuses.map((status) => {
-    const key = `${status.suite}:${status.devices || ""}`;
-    const summary = state.summaries.get(key);
-    const failed = summary?.failed ?? "-";
-    const passed = summary?.passed ?? "-";
-    return `
-      <div class="suite-card">
-        <div>
-          <strong>${escapeHtml(status.suite || "-")}</strong>
-          <p>${escapeHtml(status.devices || "-")}</p>
+  const byRun = new Map();
+  statuses.forEach((status) => {
+    const runId = status.run_id || "legacy";
+    if (!byRun.has(runId)) byRun.set(runId, []);
+    byRun.get(runId).push(status);
+  });
+
+  els.suiteList.innerHTML = [...byRun.entries()].map(([runId, runStatuses]) => {
+    const flow = state.flows.get(runId) || { mode: runStatuses[0]?.test_type || "Run", flow: "", devices: "" };
+    const rows = runStatuses.map((status) => {
+      const key = `${status.run_id || "legacy"}:${status.suite}:${status.devices || ""}`;
+      const summary = state.summaries.get(key);
+      const failed = summary?.failed ?? "-";
+      const passed = summary?.passed ?? "-";
+      return `
+        <div class="suite-row">
+          <div>
+            <strong>${escapeHtml(status.suite || "-")}</strong>
+            <p>${escapeHtml(status.devices || "-")}</p>
+          </div>
+          <div class="suite-state">
+            <span class="status-${statusClass(status.status)}">${escapeHtml(status.status || "Standby")}</span>
+            <em>${formatDuration(Number(status.elapsed_secs || 0))}</em>
+          </div>
+          <div class="suite-badges">
+            <span class="count-badge pass">Pass ${passed}</span>
+            <span class="count-badge fail">Fail ${failed}</span>
+          </div>
         </div>
-        <span class="status-${statusClass(status.status)}">${escapeHtml(status.status || "Standby")}</span>
-        <small>Pass ${passed} / Fail ${failed}</small>
+      `;
+    }).join("");
+    return `
+      <div class="flow-card">
+        <header>
+          <div>
+            <strong>${escapeHtml(flow.mode)}</strong>
+            <p>${escapeHtml(flow.flow)}</p>
+          </div>
+          <span>${runStatuses.length} suite</span>
+        </header>
+        <div class="flow-suite-list">${rows}</div>
       </div>
     `;
   }).join("");
@@ -452,8 +640,8 @@ function renderSuiteStatus() {
 function renderMetrics() {
   const statuses = [...state.suiteStatuses.values()];
   const summaries = [...state.summaries.values()];
-  const active = statuses.filter((s) => !["Completed", "Cancelled", "Failed", "Timeout"].includes(s.status)).length;
-  const completed = statuses.filter((s) => ["Completed", "Failed", "Timeout"].includes(s.status)).length;
+  const active = statuses.filter((s) => !["Test Done", "Cancelled", "Failed", "Timeout"].includes(s.status)).length;
+  const completed = statuses.filter((s) => ["Test Done", "Failed", "Timeout"].includes(s.status)).length;
   const passed = summaries.reduce((sum, s) => sum + Number(s.passed || 0), 0);
   const failed = summaries.reduce((sum, s) => sum + Number(s.failed || 0), 0);
   els.activeMetric.textContent = String(active);
@@ -463,6 +651,16 @@ function renderMetrics() {
   els.runtimeMetric.textContent = state.runStartedAt ? formatDuration(Math.floor((Date.now() - state.runStartedAt) / 1000)) : "00:00:00";
 }
 
+function ensureFlow(runId, testType, devices) {
+  if (!runId || state.flows.has(runId)) return;
+  const mode = TEST_MODES.find((item) => item.id === testType);
+  state.flows.set(runId, {
+    mode: testType || "Run",
+    flow: mode?.flow || "",
+    devices: devices || "",
+  });
+}
+
 function toggleAllReadyDevices() {
   const ready = state.devices.filter((device) => device.state === "device" && !device.busy).map((device) => device.serial);
   if (ready.length && state.selected.size === ready.length) state.selected.clear();
@@ -470,9 +668,82 @@ function toggleAllReadyDevices() {
   render();
 }
 
+function shardSelectedDevices(devices, mode) {
+  if (mode?.id === "Laundry SMR") return shardLaundrySmrDevices(devices);
+  const groups = new Map();
+  devices.forEach((device) => {
+    if (mode?.needs === "user" && device.is_userdebug) return;
+    if (mode?.needs === "userdebug" && !device.is_userdebug) return;
+    const fingerprint = fingerprintKey(device);
+    const kind = device.is_userdebug ? "USERDEBUG" : "USER";
+    const key = `${kind}::${fingerprint}`;
+    if (!groups.has(key)) groups.set(key, { kind, fingerprint, devices: [] });
+    groups.get(key).devices.push(device);
+  });
+  return [...groups.values()];
+}
+
+function shardLaundrySmrDevices(devices) {
+  const groups = new Map();
+  devices.forEach((device) => {
+    const family = fingerprintFamilyKey(device);
+    const model = modelKey(device);
+    const key = `${model}::${family}`;
+    if (!groups.has(key)) groups.set(key, { kind: "USER+USERDEBUG", fingerprint: family, model, devices: [] });
+    groups.get(key).devices.push(device);
+  });
+  return [...groups.values()].filter((group) => {
+    const hasUser = group.devices.some((device) => !device.is_userdebug);
+    const hasUserdebug = group.devices.some((device) => device.is_userdebug);
+    return hasUser && hasUserdebug;
+  });
+}
+
+function fingerprintKey(device) {
+  return (device.fingerprint || `${device.model || "UNKNOWN"}:${device.pda || "UNKNOWN"}:${device.android || "UNKNOWN"}`).trim();
+}
+
+function fingerprintFamilyKey(device) {
+  const fingerprint = String(device.fingerprint || "").trim();
+  const [productPart] = fingerprint.split(":");
+  const pieces = productPart.split("/").filter(Boolean);
+  if (pieces.length >= 3) return pieces.slice(0, 3).join("/");
+  return modelKey(device);
+}
+
+function modelKey(device) {
+  return String(device.model || "UNKNOWN_MODEL").trim().toUpperCase();
+}
+
+function shortFingerprint(value) {
+  const text = String(value || "UNKNOWN_FP");
+  const parts = text.split("/");
+  const tail = parts.length > 1 ? parts.slice(-2).join("/") : text;
+  return tail.length > 48 ? `${tail.slice(0, 45)}...` : tail;
+}
+
+function isLaundryMode(modeName) {
+  return modeName === "Laundry SMR" || modeName === "Laundry Normal";
+}
+
+async function chooseLaundryZip() {
+  const selected = await open({
+    directory: false,
+    multiple: false,
+    filters: [{ name: "Laundry zip", extensions: ["zip"] }],
+  });
+  const path = normalizeDialogPath(selected);
+  if (path) {
+    state.laundryZipPath = path;
+    appendLog(`[runner] Laundry zip selected: ${path}`);
+  }
+}
+
 async function runSelected() {
   saveInlineSettings();
   const mode = TEST_MODES.find((item) => item.id === state.selectedMode);
+  const runMode = state.selectedMode;
+  const runFlow = currentModeFlow();
   const selectedDevices = state.devices.filter((device) => state.selected.has(device.serial));
   const userDevices = selectedDevices.filter((device) => !device.is_userdebug).map((device) => device.serial);
   const userdebugDevices = selectedDevices.filter((device) => device.is_userdebug).map((device) => device.serial);
@@ -482,15 +753,28 @@ async function runSelected() {
     els.statusLine.textContent = validation;
     return;
   }
+  if (isLaundryMode(runMode) && !state.laundryZipPath) {
+    await chooseLaundryZip();
+    if (!state.laundryZipPath) {
+      appendLog("[runner] Laundry flow needs zip file.");
+      els.statusLine.textContent = "Laundry zip required";
+      return;
+    }
+  }
+
+  const autoRoot = state.autoRoot || await invoke("default_auto_root");
+  const groups = shardSelectedDevices(selectedDevices, mode);
+  if (!groups.length) {
+    appendLog("[runner] No valid device group for selected mode.");
+    return;
+  }
+  const runnableDevices = groups.flatMap((group) => group.devices);
 
   state.running = true;
-  state.suiteStatuses.clear();
-  state.summaries.clear();
   state.resultDir = "";
   state.runStartedAt = Date.now();
-  state.activeRunLogKeys.clear();
-  createRunLogTabs(selectedDevices);
-  els.runBtn.disabled = true;
+  markLocalBusy(runnableDevices, runMode);
+  state.selected.clear();
   els.cancelBtn.disabled = false;
   els.openResultBtn.disabled = true;
   els.resultPill.disabled = true;
@@ -498,29 +782,75 @@ async function runSelected() {
   els.statusLine.textContent = "Running";
   render();
 
-  appendLog(`[runner] Starting ${state.selectedMode}: user=${userDevices.join(",") || "-"} userdebug=${userdebugDevices.join(",") || "-"}`);
-  try {
-    await invoke("run_suite", {
-      request: {
-            auto_root: state.autoRoot || await invoke("default_auto_root"),
-        test_type: state.selectedMode,
-        user_devices: userDevices,
-        userdebug_devices: userdebugDevices,
-        retry_count: state.retryCount,
-        wifi_enabled: state.wifi.enabled,
-        wifi_ssid: state.wifi.ssid,
-        wifi_password: state.wifi.password,
-        timeout_secs: state.timeoutSecs,
-      },
-    });
-  } catch (error) {
-    state.running = false;
-    els.runBtn.disabled = false;
-    els.cancelBtn.disabled = true;
-    els.statusLine.textContent = "Run failed";
-    appendLog(`[runner] Run failed: ${error}`);
-    await refreshDevices();
+  appendLog(`[runner] ${runMode}: split into ${groups.length} fingerprint shard group(s).`);
+  for (const [index, group] of groups.entries()) {
+    const groupDevices = group.devices;
+    const groupSerials = groupDevices.map((device) => device.serial);
+    const groupUserDevices = groupDevices.filter((device) => !device.is_userdebug).map((device) => device.serial);
+    const groupUserdebugDevices = groupDevices.filter((device) => device.is_userdebug).map((device) => device.serial);
+    const runId = `${runMode.replaceAll(/\W+/g, "_")}_${Date.now()}_${index + 1}`;
+    const flowTitle = `${runFlow} | ${group.kind} | ${shortFingerprint(group.fingerprint)}`;
+
+    state.activeRuns.add(runId);
+    state.flows.set(runId, { mode: runMode, flow: flowTitle, devices: groupSerials.join(",") });
+    createRunLogFlow(runId, runMode, groupDevices);
+    appendLog(`[runner] Starting shard ${index + 1}/${groups.length}: ${group.kind} fingerprint=${shortFingerprint(group.fingerprint)} devices=${groupSerials.join(",")}`);
+    renderFlowMap();
+
+    try {
+      await invoke("run_suite", {
+        request: {
+          run_id: runId,
+          auto_root: autoRoot,
+          test_type: runMode,
+          laundry_zip_path: isLaundryMode(runMode) ? state.laundryZipPath : null,
+          user_devices: groupUserDevices,
+          userdebug_devices: groupUserdebugDevices,
+          retry_count: state.retryCount,
+          wifi_enabled: state.wifi.enabled,
+          wifi_ssid: state.wifi.ssid,
+          wifi_password: state.wifi.password,
+          timeout_secs: state.timeoutSecs,
+        },
+      });
+    } catch (error) {
+      state.activeRuns.delete(runId);
+      clearLocalBusy(groupSerials);
+      appendLog(`[runner] Run failed for ${groupSerials.join(",")}: ${error}`);
+    }
   }
+
+  state.running = state.activeRuns.size > 0;
+  els.cancelBtn.disabled = state.activeRuns.size === 0;
+  els.statusLine.textContent = state.running ? "Running" : "Run failed";
+  render();
+  if (!state.running) await refreshDevices();
+}
+
+function markLocalBusy(devices, testType) {
+  const stamp = new Date().toLocaleString("en-GB", { hour12: false });
+  const serials = new Set(devices.map((device) => device.serial));
+  state.devices = state.devices.map((device) => {
+    if (!serials.has(device.serial)) return device;
+    return {
+      ...device,
+      busy: true,
+      busy_reason: `${testType} ${stamp}`,
+    };
+  });
+}
+
+function clearLocalBusy(serials) {
+  const set = new Set(serials);
+  state.devices = state.devices.map((device) => {
+    if (!set.has(device.serial)) return device;
+    return {
+      ...device,
+      busy: false,
+      busy_reason: "",
+    };
+  });
+  renderDevices();
 }
 
 async function cancelRun() {
@@ -536,12 +866,47 @@ async function cancelRun() {
   }
 }
 
+async function resetBusyState() {
+  appendLog("[runner] Reset busy state requested (Ctrl+Shift+B).");
+  try {
+    await invoke("reset_busy_state", { autoRoot: state.autoRoot || null });
+    state.selected.clear();
+    appendLog("[runner] busy.json reset.");
+    await refreshDevices();
+  } catch (error) {
+    appendLog(`[runner] Reset busy state failed: ${error}`);
+  }
+}
+
 async function openResult() {
   if (!state.resultDir) return;
   try {
     await invoke("open_result", { path: state.resultDir });
   } catch (error) {
     appendLog(`[runner] Open result failed: ${error}`);
+  }
+}
+
+async function toggleLamp(serial) {
+  if (!serial) return;
+  const brighten = !state.lampStates.get(serial);
+  appendLog(`[runner] Lamp ${serial}: ${brighten ? "max brightness" : "low brightness"}`);
+  try {
+    await invoke("set_device_lamp", { serial, brighten });
+    state.lampStates.set(serial, brighten);
+    renderDevices();
+  } catch (error) {
+    appendLog(`[runner] Lamp failed for ${serial}: ${error}`);
+  }
+}
+
+async function openScrcpy(serial) {
+  if (!serial) return;
+  appendLog(`[runner] Opening scrcpy for ${serial}`);
+  try {
+    await invoke("open_scrcpy", { serial });
+  } catch (error) {
+    appendLog(`[runner] scrcpy failed for ${serial}: ${error}`);
   }
 }
 
@@ -602,8 +967,24 @@ function validateRun(mode, userDevices, userdebugDevices) {
   if (busySelected.length) return `Device busy: ${busySelected.map((device) => device.serial).join(", ")}`;
   if (mode.needs === "user" && userDevices.length === 0) return `${mode.name} needs at least one non-userdebug device.`;
   if (mode.needs === "userdebug" && userdebugDevices.length === 0) return `${mode.name} needs at least one userdebug device.`;
-  if (mode.needs === "both" && (userDevices.length === 0 || userdebugDevices.length === 0)) return "SMR needs non-userdebug and userdebug devices.";
+  if (mode.id === "Laundry SMR") {
+    const laundryValidation = validateLaundrySmrSelection();
+    if (laundryValidation) return laundryValidation;
+  }
+  if (mode.needs === "both" && userDevices.length === 0 && userdebugDevices.length === 0) return `${mode.name} needs at least one runnable device.`;
   if (!state.autoRoot) return "AUTO root is empty. Open settings and save root.";
+  return "";
+}
+
+function validateLaundrySmrSelection() {
+  const selectedDevices = state.devices.filter((device) => state.selected.has(device.serial));
+  const hasUser = selectedDevices.some((device) => !device.is_userdebug);
+  const hasUserdebug = selectedDevices.some((device) => device.is_userdebug);
+  if (!hasUser || !hasUserdebug) return "Laundry SMR needs selected USER and USERDEBUG device cards.";
+  const models = new Set(selectedDevices.map(modelKey));
+  if (models.size > 1) return `Laundry SMR devices must use the same model: ${[...models].join(", ")}`;
+  const families = new Set(selectedDevices.map(fingerprintFamilyKey));
+  if (families.size > 1) return `Laundry SMR devices must use the same fingerprint family: ${[...families].join(", ")}`;
   return "";
 }
 
@@ -611,54 +992,65 @@ function appendLog(line) {
   const text = redact(String(line || ""));
   const stamp = new Date().toLocaleTimeString("en-GB", { hour12: false });
   const kind = logKind(text);
-  const key = latestLogTabKey(kind) || ensureLogTab(`runner:${Date.now()}`, "Runner", "General");
-  const tab = state.logTabs.get(key);
+  const flow = latestLogFlowForKind(kind) || createBootLogFlow();
+  const tab = ensureLogSubtab(flow.id, kind);
   tab.lines.push(`${stamp} ${text}`);
   renderLog();
 }
 
-function createRunLogTabs(devices) {
-  const stamp = Date.now();
+function createRunLogFlow(runId, modeName, devices) {
   const primary = devices[0] || {};
   const deviceTitle = `${primary.serial || "NO_SERIAL"} ${primary.pda || "NO_PDA"} ${primary.model || "NO_MODEL"}`;
-  const runnerKey = ensureLogTab(`runner:${stamp}`, "Runner", `${state.selectedMode} ${deviceTitle}`);
-  state.activeRunLogKeys.add(runnerKey);
-  const mode = TEST_MODES.find((item) => item.id === state.selectedMode);
+  const flow = {
+    id: runId,
+    title: `${modeName} | ${deviceTitle}`,
+    tabs: new Map(),
+  };
+  state.logFlows.set(runId, flow);
+  ensureLogSubtab(runId, "Runner");
+  const mode = TEST_MODES.find((item) => item.id === modeName);
   if (mode?.needs === "user" || mode?.needs === "both") {
-    state.activeRunLogKeys.add(ensureLogTab(`cts:${stamp}`, "CTS", deviceTitle));
-    state.activeRunLogKeys.add(ensureLogTab(`gts:${stamp}`, "GTS", deviceTitle));
+    ensureLogSubtab(runId, "CTS");
+    ensureLogSubtab(runId, "GTS");
   }
   if (mode?.needs === "userdebug" || mode?.needs === "both") {
-    const debugDevice = devices.find((device) => device.is_userdebug) || primary;
-    const debugTitle = `${debugDevice.serial || "NO_SERIAL"} ${debugDevice.pda || "NO_PDA"} ${debugDevice.model || "NO_MODEL"}`;
-    state.activeRunLogKeys.add(ensureLogTab(`sts:${stamp}`, "STS", debugTitle));
+    ensureLogSubtab(runId, "STS");
   }
-  state.activeLogTab = runnerKey;
+  state.activeLogFlow = runId;
+  state.activeLogSubtab = "Runner";
 }
 
 function clearInactiveLogTabs() {
-  const keep = new Set(state.activeRunLogKeys);
-  if (!keep.size && state.activeLogTab) keep.add(state.activeLogTab);
-  for (const key of [...state.logTabs.keys()]) {
-    if (!keep.has(key)) state.logTabs.delete(key);
+  const keep = new Set(state.activeRuns);
+  if (state.activeLogFlow) keep.add(state.activeLogFlow);
+  for (const key of [...state.logFlows.keys()]) {
+    if (!keep.has(key)) state.logFlows.delete(key);
   }
-  if (!state.logTabs.has(state.activeLogTab)) {
-    state.activeLogTab = [...state.logTabs.keys()][0] || "";
+  if (!state.logFlows.has(state.activeLogFlow)) {
+    state.activeLogFlow = [...state.logFlows.keys()][0] || "";
+    state.activeLogSubtab = "Runner";
   }
 }
 
-function ensureLogTab(key, kind, title) {
-  if (!state.logTabs.has(key)) {
-    state.logTabs.set(key, { key, kind, title: `${kind} | ${title}`, lines: [] });
-  }
-  if (!state.activeLogTab) state.activeLogTab = key;
-  return key;
+function ensureLogSubtab(flowId, kind) {
+  const flow = state.logFlows.get(flowId) || createBootLogFlow();
+  if (!flow.tabs.has(kind)) flow.tabs.set(kind, { kind, lines: [] });
+  return flow.tabs.get(kind);
 }
 
-function latestLogTabKey(kind) {
-  const normalized = kind.toLowerCase();
-  const matches = [...state.logTabs.values()].filter((tab) => tab.kind.toLowerCase() === normalized);
-  return matches.length ? matches[matches.length - 1].key : "";
+function latestLogFlowForKind(kind) {
+  const flows = [...state.logFlows.values()].filter((flow) => flow.tabs.has(kind));
+  return flows[flows.length - 1];
+}
+
+function createBootLogFlow() {
+  const id = "boot";
+  if (!state.logFlows.has(id)) {
+    state.logFlows.set(id, { id, title: "RUNNING LOG", tabs: new Map() });
+    ensureLogSubtab(id, "Runner");
+  }
+  if (!state.activeLogFlow) state.activeLogFlow = id;
+  return state.logFlows.get(id);
 }
 
 function logKind(text) {
@@ -670,10 +1062,8 @@ function logKind(text) {
   return "Runner";
 }
 
-function requirementText(mode) {
-  if (mode.needs === "both") return "Requires USER + USERDEBUG";
-  if (mode.needs === "userdebug") return "Requires USERDEBUG";
-  return "Requires USER";
+function currentModeFlow() {
+  return TEST_MODES.find((mode) => mode.id === state.selectedMode)?.flow || "";
 }
 
 function statusClass(value) {

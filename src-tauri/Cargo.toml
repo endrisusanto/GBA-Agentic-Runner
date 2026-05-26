@@ -1,6 +1,6 @@
 [package]
 name = "gba-agentic-runner"
-version = "0.0.8"
+version = "0.0.9"
 description = "GBA Agentic Runner"
 authors = ["GBA Automation"]
 edition = "2021"
@@ -13,3 +13,6 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri = { version = "2.9.4", features = [] }
 tauri-plugin-dialog = "2"
+tempfile = "3"
+walkdir = "2"
+zip = "2"

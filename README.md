@@ -8,6 +8,7 @@ Desktop runner berbasis Tauri untuk otomatisasi CTS, GTS, dan STS dari folder AU
 - Mode run: `Cuci SMR`, `MR`, `SMR`, `SKU`, dan `STS`.
 - Wi-Fi auto connect, retry args, timeout, `ro.xml`, live log, summary metrics, cancel process, dan open result folder.
 - UI dark dashboard dengan running log di bawah workspace.
+- Busy-state guard via `busy.json`; tekan `Ctrl+Shift+B` untuk reset busy state bila app pernah mati paksa.
 
 ## Requirement
 
