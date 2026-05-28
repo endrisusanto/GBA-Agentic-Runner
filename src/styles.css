@@ -576,6 +576,11 @@ h2 {
 
 #flowMap {
   padding: 12px 12px 10px;
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  height: 100%;
 }
 
 .flow-resizer {
@@ -1504,6 +1509,8 @@ body.resizing-flow {
   display: flex;
   flex-direction: column;
   height: 100%;
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .run-table-content-area {
