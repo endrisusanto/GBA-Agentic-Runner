@@ -942,9 +942,8 @@ function renderSuiteStatus() {
       <div class="flow-card">
         <header>
           <div class="flow-card-header-content">
-            <strong>${escapeHtml(flow.mode)}</strong>
+            <strong>${escapeHtml(flow.mode)} Model ${escapeHtml(deviceModel)}</strong>
             <p class="flow-flow-text">${escapeHtml(flow.flow)}</p>
-            <p class="flow-device-model">Device: ${escapeHtml(deviceModel)}</p>
             <span class="flow-suite-count">${runStatuses.length} suite</span>
           </div>
         </header>
