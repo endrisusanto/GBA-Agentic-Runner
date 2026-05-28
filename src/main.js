@@ -806,11 +806,12 @@ function renderLaundryTableCards(rows) {
     byRun.get(row.runId).push(row);
   });
   return [...byRun.entries()].map(([runId, runRows]) => {
-    const flow = state.flows.get(runId);
+    const flow = state.flows.get(runId) || { mode: runRows[0]?.mode || "Laundry Run", devices: runRows[0]?.devices || "" };
+    const deviceModel = getDeviceModelsForFlow(flow);
     const active = state.activeRuns.has(runId);
     return renderLaundryTableCard({
-      title: flow?.mode || runRows[0]?.mode || "Laundry Run",
-      subtitle: `${active ? "Running" : "Done"} · ${flow?.devices || runRows[0]?.devices || "-"} · ${flow?.flow || ""}`,
+      title: `${flow.mode || "Laundry Run"} Model ${deviceModel}`,
+      subtitle: `${active ? "Running" : "Done"} · ${flow.devices || "-"} · ${flow.flow || ""}`,
       rows: runRows,
       locked: true,
       active,
