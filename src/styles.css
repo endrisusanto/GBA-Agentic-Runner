@@ -52,8 +52,11 @@ input {
   place-items: center;
   align-content: center;
   background: #080909;
-  animation: splash-out 1.25s ease forwards;
   pointer-events: none;
+}
+
+.splash.fade-out {
+  animation: splash-out 1.25s ease forwards;
 }
 
 .splash img {
@@ -547,11 +550,33 @@ h2 {
   height: 220px;
   min-height: 96px;
   max-height: 48vh;
-  padding: 10px 12px;
   background: #080909;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.flow-map .accordion-content {
+  flex: 1 1 auto;
   overflow: auto;
   scrollbar-width: thin;
   scrollbar-color: #394141 transparent;
+}
+
+.flow-map.collapsed {
+  flex: 0 0 auto !important;
+  height: auto !important;
+  min-height: 0 !important;
+  overflow: hidden !important;
+}
+
+.flow-map-actions {
+  display: flex;
+  align-items: center;
+}
+
+#flowMap {
+  padding: 0 12px 10px;
 }
 
 .flow-resizer {
@@ -606,8 +631,30 @@ body.resizing-flow {
   font-weight: 800;
 }
 
+.laundry-table-stack {
+  display: grid;
+  gap: 10px;
+  min-width: 800px;
+}
+
+.laundry-table-card {
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #0c0d0d;
+  overflow: hidden;
+}
+
+.laundry-table-card.locked {
+  background: #101212;
+}
+
+.laundry-table-card.active {
+  background: #121517;
+}
+
 .laundry-table-wrap {
   min-width: 780px;
+  overflow: hidden;
 }
 
 .laundry-table-head {
@@ -615,7 +662,10 @@ body.resizing-flow {
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  height: 28px;
+  min-height: 32px;
+  padding: 0 10px;
+  border-bottom: 1px solid var(--line-soft);
+  background: #111313;
 }
 
 .laundry-table-head strong {
@@ -635,8 +685,8 @@ body.resizing-flow {
   border-collapse: collapse;
   table-layout: fixed;
   background: #0c0d0d;
-  border: 1px solid var(--line);
-  border-radius: 6px;
+  border: 0;
+  border-radius: 0;
   overflow: hidden;
 }
 
@@ -692,6 +742,24 @@ body.resizing-flow {
 
 .laundry-table tr.skipped {
   opacity: 0.52;
+}
+
+.laundry-table tr.locked {
+  background: #121414;
+  color: #7f8989;
+}
+
+.laundry-table tr.locked.running {
+  background: #171a1c;
+}
+
+.laundry-table tr.locked td {
+  border-bottom-color: #242929;
+}
+
+.laundry-table tr.locked input {
+  opacity: 0.55;
+  cursor: default;
 }
 
 .laundry-table td strong,
@@ -779,6 +847,68 @@ body.resizing-flow {
   background: #19090b;
 }
 
+/* Accordion Panel Styles */
+.accordion-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 14px;
+  background: #111313;
+  border-bottom: 1px solid var(--line-soft);
+  cursor: pointer;
+  user-select: none;
+  font-size: 11px;
+  color: var(--muted);
+  transition: background-color 0.25s ease, color 0.25s ease;
+  min-height: 34px;
+}
+
+.accordion-header:hover {
+  background: #151818;
+  color: var(--text);
+}
+
+.accordion-header-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.accordion-header-left strong {
+  font-size: 11px;
+  font-weight: 900;
+  letter-spacing: 0.5px;
+}
+
+.accordion-icon {
+  font-size: 9px;
+  transition: transform 0.2s ease;
+  width: 10px;
+  display: inline-block;
+}
+
+.accordion-content {
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+}
+
+.collapsed .accordion-content {
+  display: none !important;
+}
+
+.collapsed .accordion-icon {
+  transform: rotate(-90deg);
+}
+
+.running-log.collapsed {
+  flex: 0 0 auto !important;
+  height: auto !important;
+  min-height: 0 !important;
+  overflow: hidden !important;
+}
+
 .running-log {
   flex: 1 1 auto;
   height: auto;
@@ -786,6 +916,13 @@ body.resizing-flow {
   flex-direction: column;
   background: #030303;
   min-height: 180px;
+  overflow: hidden;
+}
+
+.running-log .accordion-content {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
 }
 
@@ -1100,6 +1237,34 @@ body.resizing-flow {
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--muted);
+  font-size: 10px;
+  font-weight: 900;
+}
+
+.flow-card-header-content {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  min-width: 0;
+}
+
+.flow-flow-text {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 900;
+  white-space: normal !important;
+  word-break: break-all;
+}
+
+.flow-device-model {
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 900;
+}
+
+.flow-suite-count {
+  color: var(--cyan);
   font-size: 10px;
   font-weight: 900;
 }

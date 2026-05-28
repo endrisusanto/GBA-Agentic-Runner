@@ -1056,9 +1056,10 @@ fn run_laundry_cts_filters(
     emit_log(app, "[runner] Laundry SMR: running CTS EDI/security filters.");
     let log_file = log_dir.join(format!("laundry_cts_filters_{}devs.log", devices.len()));
     let copy_started = SystemTime::now();
+    let result_snapshot = ResultSnapshot::capture(&cts_root.join("results"));
     emit_laundry_result_updates(app, source_root, source_results, run_id, test_type, "CTS", "Running", 0, None);
     let outcome = run_suite_process(app, "CTS", devices, &cts_exe, &cts_root, &cmd, true, &log_file, timeout_secs, run_id, test_type, true)?;
-    copy_latest_suite_zip_artifact(app, session_dir, "CTS", &cts_root, copy_started, model, pda, devices, "filters")?;
+    copy_latest_suite_zip_artifact(app, session_dir, "CTS", &cts_root, &result_snapshot, copy_started, model, pda, devices, "filters")?;
     let summary = parse_summary(&log_file, "CTS", &devices.join(","), run_id, test_type);
     emit_laundry_result_updates(
         app,
@@ -1206,9 +1207,10 @@ fn run_laundry_retries(
         emit_log(app, format!("[runner] {suite}: retry session={session_id} result={}", target.display()));
         let log_file = log_dir.join(format!("laundry_retry_{}_{}_{}devs.log", suite.to_lowercase(), index + 1, devices.len()));
         let copy_started = SystemTime::now();
+        let result_snapshot = ResultSnapshot::capture(&suite_root.join("results"));
         emit_laundry_result_update(app, source_root, source, run_id, test_type, suite, "Running", 0, None);
         let outcome = run_suite_process(app, suite, devices, &executable, &suite_root, &cmd, suite != "STS", &log_file, timeout_secs, run_id, test_type, true)?;
-        copy_laundry_retry_artifact(app, session_dir, suite, &suite_root, &target, copy_started, model, pda, devices, index + 1)?;
+        copy_laundry_retry_artifact(app, session_dir, suite, &suite_root, &target, &result_snapshot, copy_started, model, pda, devices, index + 1)?;
         let summary = parse_summary(&log_file, suite, &devices.join(","), run_id, test_type);
         emit_laundry_result_update(
             app,
@@ -1232,6 +1234,7 @@ fn copy_laundry_retry_artifact(
     suite: &str,
     suite_root: &Path,
     result_dir: &Path,
+    result_snapshot: &ResultSnapshot,
     copy_started: SystemTime,
     model: &str,
     pda: &str,
@@ -1239,7 +1242,7 @@ fn copy_laundry_retry_artifact(
     index: usize,
 ) -> Result<(), String> {
     emit_log(app, format!("[runner] {suite}: copying retry artifact for {}", result_dir.display()));
-    let zip = latest_zip_since(&suite_root.join("results"), copy_started)
+    let zip = result_snapshot.newest_zip(&suite_root.join("results"), copy_started)
         .or_else(|| first_zip(result_dir))
         .or_else(|| {
             let sibling = result_dir.with_extension("zip");
@@ -1273,14 +1276,15 @@ fn copy_latest_suite_zip_artifact(
     session_dir: &Path,
     suite: &str,
     suite_root: &Path,
+    result_snapshot: &ResultSnapshot,
     copy_started: SystemTime,
     model: &str,
     pda: &str,
     devices: &[String],
     label: &str,
 ) -> Result<(), String> {
-    emit_log(app, format!("[runner] {suite}: copying latest artifact from {}", suite_root.join("results").display()));
-    let Some(zip) = latest_zip_since(&suite_root.join("results"), copy_started) else {
+    emit_log(app, format!("[runner] {suite}: copying new artifact from {}", suite_root.join("results").display()));
+    let Some(zip) = result_snapshot.newest_zip(&suite_root.join("results"), copy_started) else {
         emit_log(app, format!("[{suite}] No new zip found in {}", suite_root.join("results").display()));
         return Ok(());
     };
@@ -1467,6 +1471,8 @@ fn run_cts_then_gts(
     );
     let cts_log = log_dir.join(format!("cts_{}_{}devs.log", sanitize_name(model), devices.len()));
     emit_log(app, format!("[runner] CTS: starting subplan {cts_subplan} on {}", devices.join(",")));
+    let cts_snapshot = ResultSnapshot::capture(&cts_root.join("results"));
+    let cts_started = SystemTime::now();
     let cts_outcome = run_suite_process(
         app,
         "CTS",
@@ -1481,7 +1487,7 @@ fn run_cts_then_gts(
         test_type,
         true,
     )?;
-    copy_suite_result(app, root, session_dir, "CTS", devices, model, pda, &cts_log, cts_outcome.elapsed_secs, run_id, test_type)?;
+    copy_suite_result(app, root, session_dir, "CTS", devices, model, pda, &cts_log, cts_outcome.elapsed_secs, run_id, test_type, Some((&cts_snapshot, cts_started)))?;
 
     if cts_outcome.exit_code != 0 {
         emit_log(app, "[gts] CTS returned non-zero; GTS will still be attempted.");
@@ -1500,6 +1506,8 @@ fn run_cts_then_gts(
         retry_args
     );
     let gts_log = log_dir.join(format!("gts_{}_{}devs.log", sanitize_name(model), devices.len()));
+    let gts_snapshot = ResultSnapshot::capture(&gts_root.join("results"));
+    let gts_started = SystemTime::now();
     let gts_outcome = run_suite_process(
         app,
         "GTS",
@@ -1514,7 +1522,7 @@ fn run_cts_then_gts(
         test_type,
         true,
     )?;
-    copy_suite_result(app, root, session_dir, "GTS", devices, model, pda, &gts_log, gts_outcome.elapsed_secs, run_id, test_type)?;
+    copy_suite_result(app, root, session_dir, "GTS", devices, model, pda, &gts_log, gts_outcome.elapsed_secs, run_id, test_type, Some((&gts_snapshot, gts_started)))?;
 
     Ok(SuiteOutcome {
         exit_code: if cts_outcome.exit_code == 0 && gts_outcome.exit_code == 0 {
@@ -1560,6 +1568,8 @@ fn run_sts(
     );
     let sts_log = log_dir.join(format!("sts_{}_{}devs.log", sanitize_name(model), devices.len()));
     emit_log(app, format!("[runner] STS: starting dynamic incremental on {}", devices.join(",")));
+    let sts_snapshot = ResultSnapshot::capture(&sts_root.join("results"));
+    let sts_started = SystemTime::now();
     let outcome = run_suite_process(
         app,
         "STS",
@@ -1574,7 +1584,7 @@ fn run_sts(
         test_type,
         true,
     )?;
-    copy_suite_result(app, root, session_dir, "STS", devices, model, pda, &sts_log, outcome.elapsed_secs, run_id, test_type)?;
+    copy_suite_result(app, root, session_dir, "STS", devices, model, pda, &sts_log, outcome.elapsed_secs, run_id, test_type, Some((&sts_snapshot, sts_started)))?;
     Ok(outcome)
 }
 
@@ -1839,11 +1849,30 @@ fn copy_suite_result(
     elapsed_secs: u64,
     run_id: &str,
     test_type: &str,
+    snapshot: Option<(&ResultSnapshot, SystemTime)>,
 ) -> Result<(), String> {
     emit_status(app, suite, "Copying result", &devices.join(","), elapsed_secs, log_file, run_id, test_type);
     emit_log(app, format!("[runner] {suite}: copying result for {}", devices.join(",")));
     let suite_root = suite_root_for_copy(root, suite, devices)?;
     let results = suite_root.join("results");
+    if let Some((snapshot, started)) = snapshot {
+        if let Some(zip) = snapshot.newest_zip(&results, started) {
+            let dst = session_dir.join(format!(
+                "{}_{}_{}_{}.zip",
+                suite,
+                sanitize_name(model),
+                sanitize_name(pda),
+                sanitize_name(&devices.join("_"))
+            ));
+            fs::copy(&zip, &dst)
+                .map_err(|err| format!("Cannot copy {} to {}: {err}", zip.display(), dst.display()))?;
+            emit_log(app, format!("[{suite}] Result copied: {}", dst.display()));
+            emit_status(app, suite, "Test Done", &devices.join(","), elapsed_secs, log_file, run_id, test_type);
+            emit_log(app, format!("[runner] {suite}: Test Done in {}", format_duration(elapsed_secs)));
+            return Ok(());
+        }
+        emit_log(app, format!("[{suite}] No new zip detected by snapshot in {}; falling back to result move.", results.display()));
+    }
     let tmp = suite_root.join(format!(
         "results_{}_{}_{}",
         suite.to_lowercase(),
@@ -2116,6 +2145,20 @@ fn verify_laundry_suite_tools(
             if xml_path.is_file() {
                 if let Some((name, version, build)) = get_suite_info_from_xml(&xml_path) {
                     if !local_version.is_empty() && !build.is_empty() && build != local_version {
+                        let normalized_version = suite_version_from_result_version(&version);
+                        let warn_only_mismatch = (*suite == "GTS" && normalized_version.as_deref() == Some("14_r1"))
+                            || (*suite == "CTS" && normalized_version.as_deref() == Some("16.1_r4"));
+                        if warn_only_mismatch {
+                            emit_log(
+                                app,
+                                format!(
+                                    "[preflight][WARN] {suite}: ignoring {} build mismatch (laundry: {} {} / {}, local tool: {}).",
+                                    normalized_version.as_deref().unwrap_or("version"),
+                                    name, version, build, local_version
+                                ),
+                            );
+                            continue;
+                        }
                         return Err(format!(
                             "Mismatched tools version for {suite}:\n\
                              Laundry file has version: {name} {version} ({build})\n\
@@ -2909,6 +2952,53 @@ fn append_file_line(path: &Path, line: &str) {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+struct ResultSnapshot {
+    zips: HashMap<PathBuf, SystemTime>,
+}
+
+impl ResultSnapshot {
+    fn capture(dir: &Path) -> Self {
+        let mut zips = HashMap::new();
+        for entry in WalkDir::new(dir).into_iter().flatten() {
+            if !entry.file_type().is_file() || !is_zip_file(entry.path()) {
+                continue;
+            }
+            if let Ok(modified) = fs::metadata(entry.path()).and_then(|metadata| metadata.modified()) {
+                zips.insert(entry.path().to_path_buf(), modified);
+            }
+        }
+        Self { zips }
+    }
+
+    fn newest_zip(&self, dir: &Path, since: SystemTime) -> Option<PathBuf> {
+        let threshold = since.checked_sub(Duration::from_secs(3)).unwrap_or(since);
+        let mut newest: Option<(SystemTime, PathBuf)> = None;
+        for entry in WalkDir::new(dir).into_iter().flatten() {
+            if !entry.file_type().is_file() || !is_zip_file(entry.path()) {
+                continue;
+            }
+            let path = entry.path().to_path_buf();
+            let modified = fs::metadata(&path).and_then(|metadata| metadata.modified()).ok()?;
+            if modified < threshold {
+                continue;
+            }
+            if self
+                .zips
+                .get(&path)
+                .is_some_and(|previous| *previous == modified)
+            {
+                continue;
+            }
+            match newest.as_ref() {
+                Some((current, _)) if modified <= *current => {}
+                _ => newest = Some((modified, path)),
+            }
+        }
+        newest.map(|(_, path)| path)
+    }
+}
+
 fn first_zip(dir: &Path) -> Option<PathBuf> {
     let mut stack = vec![dir.to_path_buf()];
     while let Some(path) = stack.pop() {
@@ -2922,25 +3012,6 @@ fn first_zip(dir: &Path) -> Option<PathBuf> {
         }
     }
     None
-}
-
-fn latest_zip_since(dir: &Path, since: SystemTime) -> Option<PathBuf> {
-    let threshold = since.checked_sub(Duration::from_secs(3)).unwrap_or(since);
-    let mut newest: Option<(SystemTime, PathBuf)> = None;
-    for entry in WalkDir::new(dir).into_iter().flatten() {
-        if !entry.file_type().is_file() || !is_zip_file(entry.path()) {
-            continue;
-        }
-        let modified = fs::metadata(entry.path()).and_then(|metadata| metadata.modified()).ok()?;
-        if modified < threshold {
-            continue;
-        }
-        match newest.as_ref() {
-            Some((current, _)) if modified <= *current => {}
-            _ => newest = Some((modified, entry.path().to_path_buf())),
-        }
-    }
-    newest.map(|(_, path)| path)
 }
 
 fn is_zip_file(path: &Path) -> bool {

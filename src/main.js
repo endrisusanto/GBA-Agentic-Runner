@@ -66,10 +66,13 @@ const state = {
   selectedMode: "Laundry SMR",
   laundryZipPath: "",
   laundryResults: [],
+  lockedLaundryResults: new Map(),
   selectedLaundryResults: new Set(),
   lampStates: new Map(),
   running: false,
   activeRuns: new Set(),
+  runDevices: new Map(),
+  localBusy: new Map(),
   flows: new Map(),
   logFlows: new Map(),
   activeLogFlow: "",
@@ -132,20 +135,41 @@ app.innerHTML = `
 
       <section class="test-area" id="testArea"></section>
 
-      <section class="flow-map" id="flowMap"></section>
-      <div class="flow-resizer" id="flowResizer" title="Resize testcase table"></div>
-
-      <section class="running-log">
-        <div class="log-head">
-          <div class="log-tab-stack">
-            <div class="log-tabs">
-              <div class="log-flow-tabs" id="logFlowTabs"></div>
-              <button class="log-clear-button" id="clearLogBtn">Clear Log</button>
-            </div>
-            <div class="log-subtabs" id="logSubtabs"></div>
+      <section class="flow-map expanded" id="flowMapSection">
+        <div class="accordion-header" id="flowMapHeader">
+          <div class="accordion-header-left">
+            <span class="accordion-icon">▼</span>
+            <strong>RUN TABLE</strong>
+          </div>
+          <div class="flow-map-actions">
+            <button class="mini-button" id="clearTableBtn">Clear Table</button>
           </div>
         </div>
-        <pre id="logBox"></pre>
+        <div class="accordion-content">
+          <div id="flowMap"></div>
+        </div>
+      </section>
+      <div class="flow-resizer" id="flowResizer" title="Resize testcase table"></div>
+
+      <section class="running-log expanded" id="runningLogSection">
+        <div class="accordion-header" id="runningLogHeader">
+          <div class="accordion-header-left">
+            <span class="accordion-icon">▼</span>
+            <strong>CONSOLE LOG</strong>
+          </div>
+        </div>
+        <div class="accordion-content">
+          <div class="log-head">
+            <div class="log-tab-stack">
+              <div class="log-tabs">
+                <div class="log-flow-tabs" id="logFlowTabs"></div>
+                <button class="log-clear-button" id="clearLogBtn">Clear Log</button>
+              </div>
+              <div class="log-subtabs" id="logSubtabs"></div>
+            </div>
+          </div>
+          <pre id="logBox"></pre>
+        </div>
       </section>
     </main>
 
@@ -207,7 +231,9 @@ app.innerHTML = `
 const els = {
   deviceList: document.querySelector("#deviceList"),
   testArea: document.querySelector("#testArea"),
+  flowMapPanel: document.querySelector(".flow-map"),
   flowMap: document.querySelector("#flowMap"),
+  clearTableBtn: document.querySelector("#clearTableBtn"),
   flowResizer: document.querySelector("#flowResizer"),
   logBox: document.querySelector("#logBox"),
   logFlowTabs: document.querySelector("#logFlowTabs"),
@@ -252,9 +278,10 @@ els.wifiInput.checked = state.wifi.enabled;
 els.refreshBtn.addEventListener("click", refreshDevices);
 els.resetBusyBtn.addEventListener("click", resetBusyState);
 els.clearLogBtn.addEventListener("click", () => {
-  clearInactiveLogTabs();
+  clearLogView();
   renderLog();
 });
+els.clearTableBtn.addEventListener("click", clearInactiveTableCards);
 els.unselectBtn.addEventListener("click", toggleAllReadyDevices);
 els.settingsBtn.addEventListener("click", openSettings);
 els.settingsCloseBtn.addEventListener("click", closeSettings);
@@ -270,6 +297,19 @@ els.cancelBtn.addEventListener("click", cancelRun);
 els.openResultBtn.addEventListener("click", openResult);
 els.resultPill.addEventListener("click", openResult);
 els.flowResizer.addEventListener("pointerdown", startFlowResize);
+  const flowMapHeader = document.getElementById("flowMapHeader");
+  if (flowMapHeader) {
+    flowMapHeader.addEventListener("click", (e) => {
+      if (e.target.closest(".flow-map-actions") || e.target.closest("button")) return;
+      toggleSection("flowMapSection");
+    });
+  }
+  const runningLogHeader = document.getElementById("runningLogHeader");
+  if (runningLogHeader) {
+    runningLogHeader.addEventListener("click", () => {
+      toggleSection("runningLogSection");
+    });
+  }
 els.retryInput.addEventListener("change", saveInlineSettings);
 els.timeoutInput.addEventListener("change", saveInlineSettings);
 els.wifiInput.addEventListener("change", () => {
@@ -304,22 +344,21 @@ listen("gba-summary", (event) => {
 listen("gba-laundry-result-update", (event) => {
   const payload = event.payload || {};
   if (!payload.id) return;
-  state.laundryResults = state.laundryResults.map((row) => {
-    if (row.id !== payload.id) return row;
-    return {
-      ...row,
-      status: payload.status || row.status,
-      time: payload.time || row.time,
-      total: Number(payload.total ?? row.total ?? 0),
-      passed: Number(payload.passed ?? row.passed ?? 0),
-      failed: Number(payload.failed ?? row.failed ?? 0),
-    };
-  });
+  const lockedKey = `${payload.run_id || "legacy"}:${payload.id}`;
+  if (state.lockedLaundryResults.has(lockedKey)) {
+    state.lockedLaundryResults.set(lockedKey, updateLaundryRow(state.lockedLaundryResults.get(lockedKey), payload));
+  } else {
+    state.laundryResults = state.laundryResults.map((row) => row.id === payload.id ? updateLaundryRow(row, payload) : row);
+  }
   renderFlowMap();
 });
 listen("gba-run-finished", (event) => {
   const payload = event.payload || {};
-  if (payload.run_id) state.activeRuns.delete(payload.run_id);
+  if (payload.run_id) {
+    state.activeRuns.delete(payload.run_id);
+    clearLocalBusy(state.runDevices.get(payload.run_id) || []);
+    state.runDevices.delete(payload.run_id);
+  }
   state.running = state.activeRuns.size > 0;
   state.resultDir = payload.result_dir || state.resultDir;
   els.runBtn.disabled = false;
@@ -343,6 +382,12 @@ async function init() {
   try { confetti({ particleCount: 0 }); } catch (_) {}
   await reconcileAutoRoot();
   await refreshDevices();
+
+  // Fade out splash screen
+  const splash = document.getElementById("splash");
+  if (splash) {
+    splash.classList.add("fade-out");
+  }
 }
 
 async function loadDefaultRoot(overwrite = true) {
@@ -375,7 +420,7 @@ async function refreshDevices() {
   appendLog("[adb] Refreshing devices...");
   els.deviceFooter.textContent = "Scanning";
   try {
-    state.devices = await invoke("list_devices");
+    state.devices = applyLocalBusyOverlay(await invoke("list_devices"));
     const ready = new Set(state.devices.filter((d) => d.state === "device" && !d.busy).map((d) => d.serial));
     state.selected = new Set([...state.selected].filter((serial) => ready.has(serial)));
     appendLog(`[adb] Found ${state.devices.length} device(s).`);
@@ -385,6 +430,18 @@ async function refreshDevices() {
   }
   renderDevices();
   els.deviceFooter.textContent = `${state.devices.length} detected`;
+}
+
+function applyLocalBusyOverlay(devices) {
+  return devices.map((device) => {
+    const reason = state.localBusy.get(device.serial);
+    if (!reason) return device;
+    return {
+      ...device,
+      busy: true,
+      busy_reason: device.busy_reason || reason,
+    };
+  });
 }
 
 function render() {
@@ -406,26 +463,27 @@ function renderDevices() {
   }
 
   els.deviceList.innerHTML = state.devices.map((device) => {
-    const ready = device.state === "device" && !device.busy;
+    const isBusy = Boolean(device.busy || device.busy_reason);
+    const ready = device.state === "device" && !isBusy;
     const selected = state.selected.has(device.serial);
-    const badge = device.busy ? "BUSY" : (device.is_userdebug ? "USERDEBUG" : "USER");
+    const badge = isBusy ? "BUSY" : (device.is_userdebug ? "USERDEBUG" : "USER");
     const lampActive = state.lampStates.get(device.serial);
     return `
-      <article class="device-card ${selected ? "selected" : ""} ${ready ? "" : "disabled"} ${device.busy ? "busy" : ""}" data-serial="${escapeHtml(device.serial)}" role="button" tabindex="${ready ? "0" : "-1"}">
+      <article class="device-card ${selected ? "selected" : ""} ${ready ? "" : "disabled"} ${isBusy ? "busy" : ""}" data-serial="${escapeHtml(device.serial)}" role="button" tabindex="${ready ? "0" : "-1"}">
         <div class="device-top">
-          <span class="check-dot ${selected ? "checked" : ""} ${device.busy ? "loading" : ""}">${device.busy ? "" : (selected ? "✓" : "")}</span>
+          <span class="check-dot ${selected ? "checked" : ""} ${isBusy ? "loading" : ""}">${isBusy ? "" : (selected ? "✓" : "")}</span>
           <div>
             <strong>${escapeHtml(device.model || device.serial)}</strong>
             <p><b>${escapeHtml(device.serial)}</b> <span>${escapeHtml(device.state)}</span></p>
           </div>
           <div class="device-inline-actions">
-            <span class="type-pill ${device.busy ? "busy" : (device.is_userdebug ? "debug" : "")}">${badge}</span>
+            <span class="type-pill ${isBusy ? "busy" : (device.is_userdebug ? "debug" : "")}">${badge}</span>
             <button class="icon-mini lamp-button ${lampActive ? "active" : ""}" data-lamp="${escapeHtml(device.serial)}" ${device.state === "device" ? "" : "disabled"} title="Toggle lamp">🌩️</button>
             <button class="icon-mini scrcpy-button" data-scrcpy="${escapeHtml(device.serial)}" ${device.state === "device" ? "" : "disabled"} title="Open scrcpy">📱</button>
           </div>
         </div>
         <div class="device-actions">
-          <span class="busy-note">${escapeHtml(device.busy ? device.busy_reason : "")}</span>
+          <span class="busy-note">${escapeHtml(isBusy ? device.busy_reason : "")}</span>
         </div>
         <div class="device-meta">
           <span><small>ANDROID</small>${escapeHtml(device.android || "-")}</span>
@@ -527,10 +585,65 @@ function renderLogTabs() {
   });
 }
 
+function toggleSection(sectionId) {
+  const section = document.getElementById(sectionId);
+  if (!section) return;
+  const icon = section.querySelector(".accordion-icon");
+  
+  if (section.classList.contains("expanded")) {
+    section.classList.remove("expanded");
+    section.classList.add("collapsed");
+    if (icon) icon.textContent = "▶";
+  } else {
+    section.classList.remove("collapsed");
+    section.classList.add("expanded");
+    if (icon) icon.textContent = "▼";
+  }
+  updateLayoutResizerState();
+}
+
+function updateLayoutResizerState() {
+  const flowMapSec = document.getElementById("flowMapSection");
+  const runningLogSec = document.getElementById("runningLogSection");
+  const resizer = document.getElementById("flowResizer");
+  if (!flowMapSec || !runningLogSec || !resizer) return;
+  
+  const flowExpanded = flowMapSec.classList.contains("expanded");
+  const logExpanded = runningLogSec.classList.contains("expanded");
+  
+  if (flowExpanded && logExpanded) {
+    resizer.style.display = "block";
+    const savedHeight = state.flowMapHeight || "220px";
+    flowMapSec.style.flex = `0 0 ${savedHeight}`;
+    flowMapSec.style.flexBasis = savedHeight;
+    flowMapSec.style.height = savedHeight;
+    runningLogSec.style.flex = "1 1 auto";
+    runningLogSec.style.height = "auto";
+  } else {
+    resizer.style.display = "none";
+    if (!flowExpanded) {
+      flowMapSec.style.flex = "0 0 auto";
+      flowMapSec.style.flexBasis = "auto";
+      flowMapSec.style.height = "auto";
+    } else {
+      flowMapSec.style.flex = "1 1 auto";
+      flowMapSec.style.flexBasis = "auto";
+      flowMapSec.style.height = "auto";
+    }
+    if (!logExpanded) {
+      runningLogSec.style.flex = "0 0 auto";
+      runningLogSec.style.height = "auto";
+    } else {
+      runningLogSec.style.flex = "1 1 auto";
+      runningLogSec.style.height = "auto";
+    }
+  }
+}
+
 function startFlowResize(event) {
   event.preventDefault();
   const startY = event.clientY;
-  const startHeight = els.flowMap.getBoundingClientRect().height;
+  const startHeight = els.flowMapPanel.getBoundingClientRect().height;
   const workspaceHeight = document.querySelector(".workspace")?.getBoundingClientRect().height || window.innerHeight;
   const minHeight = 96;
   const maxHeight = Math.max(140, workspaceHeight - 260);
@@ -539,8 +652,10 @@ function startFlowResize(event) {
 
   const onMove = (moveEvent) => {
     const next = Math.min(maxHeight, Math.max(minHeight, startHeight + moveEvent.clientY - startY));
-    els.flowMap.style.height = `${Math.round(next)}px`;
-    els.flowMap.style.flexBasis = `${Math.round(next)}px`;
+    const rounded = Math.round(next);
+    els.flowMapPanel.style.height = `${rounded}px`;
+    els.flowMapPanel.style.flexBasis = `${rounded}px`;
+    state.flowMapHeight = `${rounded}px`;
   };
   const onUp = () => {
     document.body.classList.remove("resizing-flow");
@@ -566,7 +681,10 @@ function renderFlowMap() {
     return;
   }
 
-  if (!state.laundryZipPath || !state.laundryResults.length) {
+  const lockedRows = [...state.lockedLaundryResults.values()]
+    .filter((row) => row.mode === state.selectedMode)
+    .sort((a, b) => Number(state.activeRuns.has(b.runId)) - Number(state.activeRuns.has(a.runId)));
+  if (!state.laundryZipPath && !state.laundryResults.length && !lockedRows.length) {
     els.flowMap.innerHTML = `
       <div class="laundry-table-empty">
         <strong>${escapeHtml(state.selectedMode)}</strong>
@@ -577,17 +695,42 @@ function renderFlowMap() {
   }
 
   const selectedCount = state.selectedLaundryResults.size;
-  const rows = state.laundryResults.map((row) => {
-    const checked = state.selectedLaundryResults.has(row.id);
+  const allRows = [
+    ...lockedRows.map((row) => ({ ...row, locked: true })),
+    ...state.laundryResults.map((row) => ({ ...row, locked: false }))
+  ];
+
+  els.flowMap.innerHTML = renderLaundryTableCard({
+    title: `${state.selectedMode} Run Table`,
+    subtitle: state.laundryZipPath ? `${selectedCount}/${state.laundryResults.length} selected · ${fileName(state.laundryZipPath)}` : "Preview and active run details",
+    rows: allRows,
+    locked: false,
+    active: lockedRows.some(row => state.activeRuns.has(row.runId)),
+  });
+
+  els.flowMap.querySelectorAll(".laundry-result-check").forEach((input) => {
+    input.addEventListener("change", () => {
+      if (input.checked) state.selectedLaundryResults.add(input.dataset.id);
+      else state.selectedLaundryResults.delete(input.dataset.id);
+      renderFlowMap();
+    });
+  });
+}
+
+function renderLaundryTableCard({ title, subtitle, rows, locked = false, active = false }) {
+  const body = rows.map((row) => {
+    const locked = Boolean(row.locked);
+    const running = locked && state.activeRuns.has(row.runId);
+    const checked = locked || state.selectedLaundryResults.has(row.id);
     const status = laundryRowStatus(row, checked);
     return `
-      <tr class="${checked ? "selected" : "skipped"}">
+      <tr class="${checked ? "selected" : "skipped"} ${locked ? "locked" : ""} ${running ? "running" : ""}">
         <td class="select-cell">
-          <input class="laundry-result-check" type="checkbox" data-id="${escapeHtml(row.id)}" ${checked ? "checked" : ""} />
+          <input class="laundry-result-check" type="checkbox" data-id="${escapeHtml(row.id)}" ${checked ? "checked" : ""} ${locked ? "disabled" : ""} />
         </td>
         <td>
           <strong>${escapeHtml(row.testcase || row.suite)}</strong>
-          <span>${escapeHtml(row.suite_version || "-")} · ${escapeHtml(row.result_dir || "-")}</span>
+          <span>${escapeHtml(row.suite_version || "-")} · ${escapeHtml(row.locked ? `${row.devices || "-"} · ${row.result_dir || "-"}` : row.result_dir || "-")}</span>
         </td>
         <td class="subtest-cell">${escapeHtml(row.subtestcases || "-")}</td>
         <td><span class="status-pill status-${statusClass(status)}">${escapeHtml(status)}</span></td>
@@ -601,35 +744,29 @@ function renderFlowMap() {
     `;
   }).join("");
 
-  els.flowMap.innerHTML = `
-    <div class="laundry-table-wrap">
+  return `
+    <section class="laundry-table-card ${locked ? "locked" : ""} ${active ? "active" : ""}">
       <header class="laundry-table-head">
-        <strong>${escapeHtml(state.selectedMode)}</strong>
-        <span>${selectedCount}/${state.laundryResults.length} selected · ${escapeHtml(fileName(state.laundryZipPath))}</span>
+        <strong>${escapeHtml(title)}</strong>
+        <span>${escapeHtml(subtitle)}</span>
       </header>
-      <table class="laundry-table">
-        <thead>
-          <tr>
-            <th>Select</th>
-            <th>Testcase</th>
-            <th>Subtestcases</th>
-            <th>Status</th>
-            <th>Time</th>
-            <th>Results</th>
-          </tr>
-        </thead>
-        <tbody>${rows}</tbody>
-      </table>
-    </div>
+      <div class="laundry-table-wrap">
+        <table class="laundry-table">
+          <thead>
+            <tr>
+              <th>Select</th>
+              <th>Testcase</th>
+              <th>Subtestcases</th>
+              <th>Status</th>
+              <th>Time</th>
+              <th>Results</th>
+            </tr>
+          </thead>
+          <tbody>${body}</tbody>
+        </table>
+      </div>
+    </section>
   `;
-
-  els.flowMap.querySelectorAll(".laundry-result-check").forEach((input) => {
-    input.addEventListener("change", () => {
-      if (input.checked) state.selectedLaundryResults.add(input.dataset.id);
-      else state.selectedLaundryResults.delete(input.dataset.id);
-      renderFlowMap();
-    });
-  });
 }
 
 function laundryRowStatus(row, checked) {
@@ -651,6 +788,17 @@ function laundryRowStatus(row, checked) {
   return "Ready";
 }
 
+function updateLaundryRow(row, payload) {
+  return {
+    ...row,
+    status: payload.status || row.status,
+    time: payload.time || row.time,
+    total: Number(payload.total ?? row.total ?? 0),
+    passed: Number(payload.passed ?? row.passed ?? 0),
+    failed: Number(payload.failed ?? row.failed ?? 0),
+  };
+}
+
 function renderSuiteStatus() {
   const statuses = [...state.suiteStatuses.values()];
   if (!statuses.length) {
@@ -666,6 +814,7 @@ function renderSuiteStatus() {
 
   els.suiteList.innerHTML = [...byRun.entries()].map(([runId, runStatuses]) => {
     const flow = state.flows.get(runId) || { mode: runStatuses[0]?.test_type || "Run", flow: "", devices: "" };
+    const deviceModel = getDeviceModelsForFlow(flow);
     const rows = runStatuses.map((status) => {
       const key = `${status.run_id || "legacy"}:${status.suite}:${status.devices || ""}`;
       const summary = state.summaries.get(key);
@@ -691,11 +840,12 @@ function renderSuiteStatus() {
     return `
       <div class="flow-card">
         <header>
-          <div>
+          <div class="flow-card-header-content">
             <strong>${escapeHtml(flow.mode)}</strong>
-            <p>${escapeHtml(flow.flow)}</p>
+            <p class="flow-flow-text">${escapeHtml(flow.flow)}</p>
+            <p class="flow-device-model">Device: ${escapeHtml(deviceModel)}</p>
+            <span class="flow-suite-count">${runStatuses.length} suite</span>
           </div>
-          <span>${runStatuses.length} suite</span>
         </header>
         <div class="flow-suite-list">${rows}</div>
       </div>
@@ -720,11 +870,32 @@ function renderMetrics() {
 function ensureFlow(runId, testType, devices) {
   if (!runId || state.flows.has(runId)) return;
   const mode = TEST_MODES.find((item) => item.id === testType);
+  const serials = (devices || "").split(",").filter(Boolean);
+  const models = serials.map(serial => {
+    const dev = state.devices.find(d => d.serial === serial);
+    return dev ? (dev.model || serial) : serial;
+  });
+  const groupModels = [...new Set(models)].join(", ");
+
   state.flows.set(runId, {
     mode: testType || "Run",
     flow: mode?.flow || "",
     devices: devices || "",
+    model: groupModels || "Unknown",
   });
+}
+
+function getDeviceModelsForFlow(flow) {
+  if (!flow) return "Unknown";
+  if (flow.model) return flow.model;
+  if (!flow.devices) return "Unknown";
+  const serials = flow.devices.split(",").filter(Boolean);
+  const models = serials.map(serial => {
+    const dev = state.devices.find(d => d.serial === serial);
+    return dev ? (dev.model || serial) : serial;
+  });
+  const unique = [...new Set(models)];
+  return unique.join(", ") || "Unknown";
 }
 
 function toggleAllReadyDevices() {
@@ -807,7 +978,7 @@ async function chooseLaundryZip() {
     renderFlowMap();
     try {
       const rows = await invoke("analyze_laundry_zip", { zipPath: path });
-      state.laundryResults = Array.isArray(rows) ? rows : [];
+      state.laundryResults = (Array.isArray(rows) ? rows : []).filter((row) => !isCtsVerifierRow(row));
       state.selectedLaundryResults = new Set(state.laundryResults.map((row) => row.id));
       appendLog(`[runner] Laundry zip scanned: ${state.laundryResults.length} result(s).`);
       renderFlowMap();
@@ -859,6 +1030,8 @@ async function runSelected() {
     return;
   }
   const runnableDevices = groups.flatMap((group) => group.devices);
+  const laundryZipPathForRun = state.laundryZipPath;
+  const selectedLaundryResultsForRun = [...state.selectedLaundryResults];
 
   state.running = true;
   state.resultDir = "";
@@ -881,8 +1054,16 @@ async function runSelected() {
     const runId = `${runMode.replaceAll(/\W+/g, "_")}_${Date.now()}_${index + 1}`;
     const flowTitle = `${runFlow} | ${group.kind} | ${shortFingerprint(group.fingerprint)}`;
 
+    const groupModels = [...new Set(groupDevices.map(d => d.model || "Unknown"))].join(", ");
     state.activeRuns.add(runId);
-    state.flows.set(runId, { mode: runMode, flow: flowTitle, devices: groupSerials.join(",") });
+    state.runDevices.set(runId, groupSerials);
+    state.flows.set(runId, {
+      mode: runMode,
+      flow: flowTitle,
+      devices: groupSerials.join(","),
+      model: groupModels || "Unknown",
+    });
+    if (isLaundryMode(runMode)) lockLaundryRowsForRun(runId, runMode, groupSerials);
     createRunLogFlow(runId, runMode, groupDevices);
     appendLog(`[runner] Starting shard ${index + 1}/${groups.length}: ${group.kind} fingerprint=${shortFingerprint(group.fingerprint)} devices=${groupSerials.join(",")}`);
     renderFlowMap();
@@ -893,8 +1074,8 @@ async function runSelected() {
           run_id: runId,
           auto_root: autoRoot,
           test_type: runMode,
-          laundry_zip_path: isLaundryMode(runMode) ? state.laundryZipPath : null,
-          selected_laundry_results: isLaundryMode(runMode) ? [...state.selectedLaundryResults] : [],
+          laundry_zip_path: isLaundryMode(runMode) ? laundryZipPathForRun : null,
+          selected_laundry_results: isLaundryMode(runMode) ? selectedLaundryResultsForRun : [],
           user_devices: groupUserDevices,
           userdebug_devices: groupUserdebugDevices,
           retry_count: state.retryCount,
@@ -923,18 +1104,50 @@ function markLocalBusy(devices, testType) {
   const serials = new Set(devices.map((device) => device.serial));
   state.devices = state.devices.map((device) => {
     if (!serials.has(device.serial)) return device;
+    const reason = `${testType} ${stamp}`;
+    state.localBusy.set(device.serial, reason);
     return {
       ...device,
       busy: true,
-      busy_reason: `${testType} ${stamp}`,
+      busy_reason: reason,
     };
   });
+}
+
+function lockLaundryRowsForRun(runId, mode, serials) {
+  const selected = new Set(state.selectedLaundryResults);
+  state.laundryResults
+    .filter((row) => selected.has(row.id))
+    .forEach((row) => {
+      state.lockedLaundryResults.set(`${runId}:${row.id}`, {
+        ...row,
+        runId,
+        mode,
+        devices: serials.join(","),
+        locked: true,
+        status: "Queued",
+      });
+    });
+  state.laundryResults = [];
+  state.selectedLaundryResults = new Set();
+  state.laundryZipPath = "";
+}
+
+function isCtsVerifierRow(row) {
+  const text = [
+    row?.testcase,
+    row?.result_dir,
+    row?.subtestcases,
+    row?.id,
+  ].join(" ").toUpperCase();
+  return text.includes("CTS_VERIFIER") || text.includes("CTSV");
 }
 
 function clearLocalBusy(serials) {
   const set = new Set(serials);
   state.devices = state.devices.map((device) => {
     if (!set.has(device.serial)) return device;
+    state.localBusy.delete(device.serial);
     return {
       ...device,
       busy: false,
@@ -962,6 +1175,8 @@ async function resetBusyState() {
   try {
     await invoke("reset_busy_state", { autoRoot: state.autoRoot || null });
     state.selected.clear();
+    state.localBusy.clear();
+    state.runDevices.clear();
     appendLog("[runner] busy.json reset.");
     await refreshDevices();
   } catch (error) {
@@ -1131,6 +1346,26 @@ function clearInactiveLogTabs() {
     state.activeLogFlow = [...state.logFlows.keys()][0] || "";
     state.activeLogSubtab = "Runner";
   }
+}
+
+function clearLogView() {
+  const flow = state.logFlows.get(state.activeLogFlow);
+  const tab = flow?.tabs?.get(state.activeLogSubtab);
+  if (tab) tab.lines = [];
+  clearInactiveLogTabs();
+}
+
+function clearInactiveTableCards() {
+  state.laundryResults = [];
+  state.selectedLaundryResults = new Set();
+  state.laundryZipPath = "";
+  for (const [key, row] of [...state.lockedLaundryResults.entries()]) {
+    if (!state.activeRuns.has(row.runId)) {
+      state.lockedLaundryResults.delete(key);
+    }
+  }
+  appendLog("[runner] Cleared inactive table cards.");
+  renderFlowMap();
 }
 
 function ensureLogSubtab(flowId, kind) {
