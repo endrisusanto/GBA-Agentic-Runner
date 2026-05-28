@@ -290,6 +290,98 @@ fn analyze_laundry_zip(zip_path: String) -> Result<Vec<LaundryResultInfo>, Strin
 }
 
 #[tauri::command]
+fn check_laundry_mismatches(auto_root: String, zip_path: String) -> Result<Vec<String>, String> {
+    let root = resolve_auto_root(Some(auto_root))?;
+    let zip_path = PathBuf::from(zip_path);
+    if !zip_path.is_file() {
+        return Err(format!("Laundry zip not found: {}", zip_path.display()));
+    }
+
+    let temp = tempfile::Builder::new()
+        .prefix("gba-laundry-mismatch-check-")
+        .tempdir()
+        .map_err(|err| format!("Cannot create temp dir: {err}"))?;
+    extract_zip_safe(&zip_path, temp.path())?;
+    extract_nested_zips(temp.path())?;
+
+    let (cts_results, gts_results, sts_results) = scan_laundry_results(temp.path());
+    let mut warnings = Vec::new();
+
+    let suites = vec![
+        ("CTS", &cts_results),
+        ("GTS", &gts_results),
+        ("STS", &sts_results),
+    ];
+
+    for (suite, result_dirs) in suites {
+        for dir in result_dirs {
+            let xml_path = dir.join("test_result.xml");
+            if !xml_path.is_file() {
+                continue;
+            }
+            let Some((name, version, build)) = get_suite_info_from_xml(&xml_path) else {
+                continue;
+            };
+
+            // Try to resolve the suite root
+            let suite_root = if suite == "CTS" {
+                if let Some(v) = cts_version_from_result(dir) {
+                    resolve_cts_root(&root, &v).ok()
+                } else {
+                    None
+                }
+            } else if suite == "GTS" {
+                if let Some(v) = suite_version_from_result(dir) {
+                    resolve_gts_root(&root, &v).ok()
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            // If we could not resolve it or it resolved but doesn't exist, we fall back to generic suite folder
+            let suite_root = suite_root.unwrap_or_else(|| root.join(suite));
+
+            let version_txt = suite_root.join("tools/version.txt");
+            let local_version = if version_txt.is_file() {
+                fs::read_to_string(&version_txt)
+                    .map(|s| s.trim().to_string())
+                    .unwrap_or_default()
+            } else {
+                String::new()
+            };
+
+            if !local_version.is_empty() && !build.is_empty() && build != local_version {
+                let normalized_version = suite_version_from_result_version(&version);
+                let local_folder_version = suite_root
+                    .parent()
+                    .and_then(|p| p.file_name())
+                    .and_then(|f| f.to_str())
+                    .unwrap_or("");
+                let is_same_version = !local_folder_version.is_empty()
+                    && normalized_version.as_deref() == Some(local_folder_version);
+
+                warnings.push(format!(
+                    "Mismatched tools version for {suite} (ignored: {ignored}):\n\
+                     Laundry file has version: {name} {version} ({build})\n\
+                     Local tool has version: ({local_version})\n\
+                     Please align laundry file and local tools.",
+                    suite = suite,
+                    ignored = is_same_version,
+                    name = name,
+                    version = version,
+                    build = build,
+                    local_version = local_version
+                ));
+            }
+        }
+    }
+
+    Ok(warnings)
+}
+
+#[tauri::command]
 fn run_suite(
     app: AppHandle,
     run_state: State<'_, RunState>,
@@ -2146,8 +2238,13 @@ fn verify_laundry_suite_tools(
                 if let Some((name, version, build)) = get_suite_info_from_xml(&xml_path) {
                     if !local_version.is_empty() && !build.is_empty() && build != local_version {
                         let normalized_version = suite_version_from_result_version(&version);
-                        let warn_only_mismatch = (*suite == "GTS" && normalized_version.as_deref() == Some("14_r1"))
-                            || (*suite == "CTS" && normalized_version.as_deref() == Some("16.1_r4"));
+                        let local_folder_version = suite_root
+                            .parent()
+                            .and_then(|p| p.file_name())
+                            .and_then(|f| f.to_str())
+                            .unwrap_or("");
+                        let warn_only_mismatch = !local_folder_version.is_empty()
+                            && normalized_version.as_deref() == Some(local_folder_version);
                         if warn_only_mismatch {
                             emit_log(
                                 app,
@@ -2424,7 +2521,7 @@ fn cleanup_deviceinfo_backups(result_dir: &Path) {
 
 fn generate_ro_xml_file(serial: &str, dir: &Path) -> Result<String, String> {
     fs::create_dir_all(dir).map_err(|err| err.to_string())?;
-    let xml = dir.join(format!("ro_{}.xml", sanitize_name(serial)));
+    let xml = dir.join("ro.xml");
     let props = [
         "ro.build.fingerprint",
         "ro.build.version.base_os",
@@ -2455,16 +2552,17 @@ fn generate_ro_xml_file(serial: &str, dir: &Path) -> Result<String, String> {
         "partition.system_ext.verified.root_digest",
     ];
     let map = device_props(serial).unwrap_or_default();
-    let mut text = String::from("<RO>\n");
+    let mut text = String::from("<RO>\n\n");
     for key in props {
         let val = xml_escape(&prop(&map, key));
-        text.push_str(&format!("    <{key}>{val}</{key}>\n"));
+        text.push_str(&format!("<{key}>{val}\n</{key}>\n"));
     }
 
     let features = adb_device_output(serial, &["shell", "pm", "list", "features"]).unwrap_or_default();
+    let is_watch = if features.contains("feature:android.hardware.type.watch") { "true" } else { "false" };
     text.push_str(&format!(
-        "\n    <isWatch>{}</isWatch>\n",
-        features.contains("feature:android.hardware.type.watch")
+        "\n<isWatch>{}</isWatch>\n",
+        is_watch
     ));
     let sms = adb_device_output(
         serial,
@@ -2478,7 +2576,7 @@ fn generate_ro_xml_file(serial: &str, dir: &Path) -> Result<String, String> {
     } else {
         "Not Found"
     };
-    text.push_str(&format!("    <message>{message}</message>\n"));
+    text.push_str(&format!("\n<message>{message}</message>\n"));
     let browser = adb_device_output(
         serial,
         &[
@@ -2494,15 +2592,15 @@ fn generate_ro_xml_file(serial: &str, dir: &Path) -> Result<String, String> {
     } else {
         "Not Found"
     };
-    text.push_str(&format!("    <browser>{browser_val}</browser>\n"));
+    text.push_str(&format!("\n<browser>{browser_val}</browser>\n"));
 
     let client_ids = adb_device_output(serial, &["shell", "getprop | grep clientidbase"]).unwrap_or_default();
     for line in client_ids.lines() {
         if let Some((key, value)) = parse_getprop_line(line) {
-            text.push_str(&format!("    <{}>{}</{}>\n", key, xml_escape(&value), key));
+            text.push_str(&format!("\n<{}>{}</{}>\n", key, xml_escape(&value), key));
         }
     }
-    text.push_str("\n    <ro.version>4.4</ro.version>\n</RO>\n");
+    text.push_str("\n<ro.version>4.4</ro.version>\n</RO>\n");
     fs::write(&xml, text).map_err(|err| err.to_string())?;
     Ok(xml.display().to_string())
 }
@@ -3248,7 +3346,8 @@ fn main() {
             open_scrcpy,
             open_result,
             analyze_laundry_zip,
-            generate_ro_xml
+            generate_ro_xml,
+            check_laundry_mismatches
         ])
         .run(tauri::generate_context!())
         .expect("error while running GBA Agentic Runner");

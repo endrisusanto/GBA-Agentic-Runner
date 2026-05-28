@@ -81,6 +81,8 @@ const state = {
   summaries: new Map(),
   resultDir: "",
   runStartedAt: null,
+  runTableTab: "preview",
+  laundryWarnings: [],
 };
 
 const app = document.querySelector("#app");
@@ -682,7 +684,7 @@ function renderFlowMap() {
   }
 
   const lockedRows = [...state.lockedLaundryResults.values()]
-    .filter((row) => row.mode === state.selectedMode)
+    .filter((row) => isLaundryMode(row.mode))
     .sort((a, b) => Number(state.activeRuns.has(b.runId)) - Number(state.activeRuns.has(a.runId)));
   if (!state.laundryZipPath && !state.laundryResults.length && !lockedRows.length) {
     els.flowMap.innerHTML = `
@@ -694,18 +696,98 @@ function renderFlowMap() {
     return;
   }
 
-  const selectedCount = state.selectedLaundryResults.size;
-  const allRows = [
-    ...lockedRows.map((row) => ({ ...row, locked: true })),
-    ...state.laundryResults.map((row) => ({ ...row, locked: false }))
-  ];
+  // Count elements for tabs
+  const runningRows = lockedRows.filter((row) => state.activeRuns.has(row.runId));
+  const completedRows = lockedRows.filter((row) => !state.activeRuns.has(row.runId));
 
-  els.flowMap.innerHTML = renderLaundryTableCard({
-    title: `${state.selectedMode} Run Table`,
-    subtitle: state.laundryZipPath ? `${selectedCount}/${state.laundryResults.length} selected · ${fileName(state.laundryZipPath)}` : "Preview and active run details",
-    rows: allRows,
-    locked: false,
-    active: lockedRows.some(row => state.activeRuns.has(row.runId)),
+  const runningRunIds = [...new Set(runningRows.map((r) => r.runId))];
+  const completedRunIds = [...new Set(completedRows.map((r) => r.runId))];
+
+  const runningCount = runningRunIds.length;
+  const completedCount = completedRunIds.length;
+
+  if (!state.runTableTab) {
+    state.runTableTab = "preview";
+  }
+
+  const warningCount = state.laundryWarnings ? state.laundryWarnings.length : 0;
+
+  const tabsHtml = `
+    <div class="run-table-tabs">
+      <button class="run-tab-btn ${state.runTableTab === 'preview' ? 'active' : ''}" data-tab="preview">
+        Preview ${state.laundryZipPath ? '✓' : ''}
+      </button>
+      <button class="run-tab-btn ${state.runTableTab === 'running' ? 'active' : ''}" data-tab="running">
+        Running (${runningCount})
+      </button>
+      <button class="run-tab-btn ${state.runTableTab === 'completed' ? 'active' : ''}" data-tab="completed">
+        Completed (${completedCount})
+      </button>
+      <button class="run-tab-btn ${state.runTableTab === 'warning' ? 'active' : ''}" data-tab="warning">
+        Warning (${warningCount})
+      </button>
+    </div>
+  `;
+
+  let contentHtml = "";
+  if (state.runTableTab === "preview") {
+    if (state.laundryResults.length) {
+      const selectedCount = state.selectedLaundryResults.size;
+      contentHtml = renderLaundryTableCard({
+        title: `${state.selectedMode} · Picked Zip`,
+        subtitle: `${selectedCount}/${state.laundryResults.length} selected · ${fileName(state.laundryZipPath)}`,
+        rows: state.laundryResults.map((row) => ({ ...row, locked: false, running: false })),
+      });
+    } else {
+      contentHtml = `<div class="empty">No preview zip loaded. Select a laundry mode action to browse and load a zip.</div>`;
+    }
+  } else if (state.runTableTab === "running") {
+    if (runningCount > 0) {
+      contentHtml = `<div class="laundry-table-stack">${renderLaundryTableCards(runningRows)}</div>`;
+    } else {
+      contentHtml = `<div class="empty">No active running flows.</div>`;
+    }
+  } else if (state.runTableTab === "completed") {
+    if (completedCount > 0) {
+      contentHtml = `<div class="laundry-table-stack">${renderLaundryTableCards(completedRows)}</div>`;
+    } else {
+      contentHtml = `<div class="empty">No completed flows.</div>`;
+    }
+  } else if (state.runTableTab === "warning") {
+    if (warningCount > 0) {
+      contentHtml = `
+        <div class="warning-container">
+          ${state.laundryWarnings.map((warn) => `
+            <div class="warning-card">
+              <div class="warning-title">
+                <span class="warning-icon-alert">⚠️</span>
+                <strong>Mismatched Tool Version</strong>
+              </div>
+              <pre class="warning-desc">${escapeHtml(warn)}</pre>
+            </div>
+          `).join("")}
+        </div>
+      `;
+    } else {
+      contentHtml = `<div class="empty no-warnings">No tool version mismatches detected. Local tools match the laundry zip versions.</div>`;
+    }
+  }
+
+  els.flowMap.innerHTML = `
+    <div class="run-table-container">
+      ${tabsHtml}
+      <div class="run-table-content-area">
+        ${contentHtml}
+      </div>
+    </div>
+  `;
+
+  // Bind tab buttons
+  els.flowMap.querySelectorAll(".run-tab-btn").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      state.runTableTab = btn.dataset.tab;
+      renderFlowMap();
+    });
   });
 
   els.flowMap.querySelectorAll(".laundry-result-check").forEach((input) => {
@@ -715,6 +797,25 @@ function renderFlowMap() {
       renderFlowMap();
     });
   });
+}
+
+function renderLaundryTableCards(rows) {
+  const byRun = new Map();
+  rows.forEach((row) => {
+    if (!byRun.has(row.runId)) byRun.set(row.runId, []);
+    byRun.get(row.runId).push(row);
+  });
+  return [...byRun.entries()].map(([runId, runRows]) => {
+    const flow = state.flows.get(runId);
+    const active = state.activeRuns.has(runId);
+    return renderLaundryTableCard({
+      title: flow?.mode || runRows[0]?.mode || "Laundry Run",
+      subtitle: `${active ? "Running" : "Done"} · ${flow?.devices || runRows[0]?.devices || "-"} · ${flow?.flow || ""}`,
+      rows: runRows,
+      locked: true,
+      active,
+    });
+  }).join("");
 }
 
 function renderLaundryTableCard({ title, subtitle, rows, locked = false, active = false }) {
@@ -974,6 +1075,7 @@ async function chooseLaundryZip() {
     state.laundryZipPath = path;
     state.laundryResults = [];
     state.selectedLaundryResults = new Set();
+    state.laundryWarnings = [];
     appendLog(`[runner] Laundry zip selected: ${path}`);
     renderFlowMap();
     try {
@@ -981,6 +1083,18 @@ async function chooseLaundryZip() {
       state.laundryResults = (Array.isArray(rows) ? rows : []).filter((row) => !isCtsVerifierRow(row));
       state.selectedLaundryResults = new Set(state.laundryResults.map((row) => row.id));
       appendLog(`[runner] Laundry zip scanned: ${state.laundryResults.length} result(s).`);
+      
+      try {
+        const autoRoot = state.autoRoot || await invoke("default_auto_root");
+        const warnings = await invoke("check_laundry_mismatches", { autoRoot, zipPath: path });
+        state.laundryWarnings = Array.isArray(warnings) ? warnings : [];
+        if (state.laundryWarnings.length > 0) {
+          appendLog(`[runner] Mismatched tools check: Found ${state.laundryWarnings.length} warning(s).`);
+        }
+      } catch (err) {
+        appendLog(`[runner] Tool version mismatch check failed: ${err}`);
+      }
+
       renderFlowMap();
     } catch (error) {
       appendLog(`[runner] Laundry zip scan failed: ${error}`);

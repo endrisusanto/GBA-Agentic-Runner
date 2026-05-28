@@ -549,7 +549,6 @@ h2 {
   flex: 0 0 220px;
   height: 220px;
   min-height: 96px;
-  max-height: 48vh;
   background: #080909;
   display: flex;
   flex-direction: column;
@@ -558,9 +557,9 @@ h2 {
 
 .flow-map .accordion-content {
   flex: 1 1 auto;
-  overflow: auto;
-  scrollbar-width: thin;
-  scrollbar-color: #394141 transparent;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 .flow-map.collapsed {
@@ -576,7 +575,7 @@ h2 {
 }
 
 #flowMap {
-  padding: 0 12px 10px;
+  padding: 12px 12px 10px;
 }
 
 .flow-resizer {
@@ -907,6 +906,7 @@ body.resizing-flow {
   height: auto !important;
   min-height: 0 !important;
   overflow: hidden !important;
+  margin-top: auto !important;
 }
 
 .running-log {
@@ -1460,4 +1460,98 @@ body.resizing-flow {
   font-size: 11px;
   line-height: 1.45;
   white-space: pre-wrap;
+}
+
+/* Run Table Tabs Styles */
+.run-table-tabs {
+  display: flex;
+  gap: 4px;
+  border-bottom: 1px solid var(--line-soft);
+  margin-bottom: 10px;
+  padding: 0 12px;
+}
+
+.run-tab-btn {
+  background: transparent;
+  border: 1px solid transparent;
+  border-bottom: 0;
+  border-radius: 4px 4px 0 0;
+  padding: 6px 12px;
+  font-size: 10px;
+  font-weight: 900;
+  text-transform: uppercase;
+  color: var(--muted);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+}
+
+.run-tab-btn:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.run-tab-btn.active {
+  color: var(--cyan);
+  background: #0a2935;
+  border-color: rgba(33, 216, 255, 0.22);
+  border-bottom: 2px solid var(--cyan);
+}
+
+.run-table-container {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+}
+
+.run-table-content-area {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  scrollbar-width: thin;
+  scrollbar-color: #394141 transparent;
+}
+
+/* Warnings Tab Styles */
+.warning-container {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+}
+
+.warning-card {
+  border: 1px solid rgba(218, 206, 105, 0.3);
+  border-radius: 6px;
+  background: #16150d;
+  padding: 12px;
+}
+
+.warning-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  color: var(--yellow);
+}
+
+.warning-title strong {
+  font-size: 11px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.warning-desc {
+  margin: 0;
+  white-space: pre-wrap;
+  font-family: "Cascadia Mono", "JetBrains Mono", Consolas, monospace;
+  font-size: 10px;
+  color: var(--text);
+  line-height: 1.4;
+}
+
+.warning-icon-alert {
+  font-size: 12px;
 }
