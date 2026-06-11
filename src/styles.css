@@ -672,6 +672,13 @@ body.resizing-flow {
   background: #111313;
 }
 
+.laundry-table-head-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
 .laundry-table-head strong {
   color: var(--green);
   font-size: 11px;
@@ -1268,8 +1275,19 @@ body.resizing-flow {
   font-weight: 900;
 }
 
+.flow-suite-progress {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.progress-ring {
+  display: inline-block;
+  vertical-align: middle;
+}
+
 .flow-suite-count {
-  color: var(--cyan);
   font-size: 10px;
   font-weight: 900;
 }

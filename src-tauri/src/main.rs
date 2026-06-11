@@ -760,7 +760,7 @@ fn run_suite_blocking(app: AppHandle, root: PathBuf, request: RunSuiteRequest, r
                     &log_dir,
                     &request.user_devices,
                     "ctssmr",
-                    "run gts --subplan gtssmr",
+                    "run gts-smr",
                     &retry_args,
                     request.timeout_secs,
                     &model,
@@ -876,7 +876,9 @@ fn run_laundry_smr(
     run_id: &str,
 ) -> Result<SuiteOutcome, String> {
     let source = prepare_laundry_source(app, request, session_dir)?;
-    verify_laundry_suite_tools(app, root, &request.user_devices, &source, &["GTS", "CTS"])?;
+    if !request.user_devices.is_empty() {
+        verify_laundry_suite_tools(app, root, &request.user_devices, &source, &["GTS", "CTS"])?;
+    }
     if !request.userdebug_devices.is_empty() {
         verify_laundry_suite_tools(app, root, &request.userdebug_devices, &source, &["STS"])?;
     }
@@ -1135,7 +1137,13 @@ fn run_laundry_cts_filters(
 ) -> Result<Vec<i32>, String> {
     let first = devices.first().ok_or_else(|| "Laundry SMR CTS needs user devices".to_string())?;
     let props = device_props(first).unwrap_or_default();
-    let cts_root = resolve_cts_root(root, &android_major(&prop(&props, "ro.build.version.release")))?;
+    let oneui = prop(&props, "ro.build.version.oneui");
+    let version_hint = if oneui == "80500" {
+        "16.1".to_string()
+    } else {
+        android_major(&prop(&props, "ro.build.version.release"))
+    };
+    let cts_root = resolve_cts_root(root, &version_hint)?;
     let cts_exe = cts_root.join("tools/cts-tradefed");
     if !cts_exe.is_file() {
         return Err(format!("cts-tradefed not found: {}", cts_exe.display()));
@@ -1542,8 +1550,12 @@ fn run_cts_then_gts(
 ) -> Result<SuiteOutcome, String> {
     let first = devices.first().ok_or_else(|| "CTS/GTS needs user devices".to_string())?;
     let props = device_props(first).unwrap_or_default();
-    let android = prop(&props, "ro.build.version.release");
-    let major = android_major(&android);
+    let oneui = prop(&props, "ro.build.version.oneui");
+    let major = if oneui == "80500" {
+        "16.1".to_string()
+    } else {
+        android_major(&prop(&props, "ro.build.version.release"))
+    };
     let cts_root = resolve_cts_root(root, &major)?;
     let cts_exe = cts_root.join("tools/cts-tradefed");
     let subplan = cts_root.join("subplans").join(format!("{cts_subplan}.xml"));
@@ -2003,7 +2015,12 @@ fn copy_suite_result(
 fn suite_root_for_copy(root: &Path, suite: &str, devices: &[String]) -> Result<PathBuf, String> {
     let first = devices.first().ok_or_else(|| "No device for suite root".to_string())?;
     let props = device_props(first).unwrap_or_default();
-    let android = android_major(&prop(&props, "ro.build.version.release"));
+    let oneui = prop(&props, "ro.build.version.oneui");
+    let android = if oneui == "80500" {
+        "16.1".to_string()
+    } else {
+        android_major(&prop(&props, "ro.build.version.release"))
+    };
     match suite {
         "CTS" => resolve_cts_root(root, &android),
         "GTS" => resolve_gts_root(root, ""),
@@ -2810,9 +2827,41 @@ fn validate_request(request: &RunSuiteRequest) -> Result<(), String> {
 }
 
 fn validate_laundry_smr_pair(request: &RunSuiteRequest) -> Result<(), String> {
-    if request.user_devices.is_empty() || request.userdebug_devices.is_empty() {
-        return Err("Laundry SMR needs selected USER and USERDEBUG devices".to_string());
+    let mut has_cts_or_gts = false;
+    let mut has_sts = false;
+    
+    for id in &request.selected_laundry_results {
+        let upper_id = id.to_uppercase();
+        if upper_id.contains("STS") || upper_id.contains("SECURITY") {
+            has_sts = true;
+        }
+        if upper_id.contains("CTS") || upper_id.contains("COMPATIBILITY") || upper_id.contains("GTS") || upper_id.contains("GOOGLE") {
+            has_cts_or_gts = true;
+        }
     }
+    
+    if request.selected_laundry_results.is_empty() {
+        if request.user_devices.is_empty() && request.userdebug_devices.is_empty() {
+            return Err("Laundry SMR needs at least one device".to_string());
+        }
+    } else if has_cts_or_gts && has_sts {
+        if request.user_devices.is_empty() || request.userdebug_devices.is_empty() {
+            return Err("Laundry SMR needs selected USER and USERDEBUG devices".to_string());
+        }
+    } else if has_cts_or_gts {
+        if request.user_devices.is_empty() {
+            return Err("Laundry SMR needs selected USER device for CTS/GTS".to_string());
+        }
+    } else if has_sts {
+        if request.userdebug_devices.is_empty() {
+            return Err("Laundry SMR needs selected USERDEBUG device for STS".to_string());
+        }
+    } else {
+        if request.user_devices.is_empty() && request.userdebug_devices.is_empty() {
+            return Err("Laundry SMR needs at least one device".to_string());
+        }
+    }
+
     let serials = selected_serials(request);
     let mut models = Vec::new();
     let mut families = Vec::new();

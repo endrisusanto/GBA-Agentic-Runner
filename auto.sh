@@ -704,7 +704,7 @@ main() {
     case "$test_type" in
         "Cuci SMR") rcts=true; rgts=true; csub="ctssmr"; gcmd="run gts --subplan gtssmr";;
         MR) rcts=true; rgts=true; csub="normal"; gcmd="run gts --subplan normal";;
-        SMR) rcts=true; rgts=true; rsts=true; csub="ctssmr"; gcmd="run gts --subplan gtssmr";;
+        SMR) rcts=true; rgts=true; rsts=true; csub="ctssmr"; gcmd="run gts-smr";;
         SKU) rcts=true; rgts=true; csub="ctssku"; gcmd="run gts-variant";;
         STS) rsts=true;;
     esac

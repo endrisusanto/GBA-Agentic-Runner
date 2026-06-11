@@ -55,7 +55,7 @@ const TEST_MODES = [
 const state = {
   autoRoot: localStorage.getItem("autoRoot") || "",
   wifi: {
-    enabled: localStorage.getItem("autoWifiAutoConnect") === "true",
+    enabled: localStorage.getItem("autoWifiAutoConnect") !== "false",
     ssid: localStorage.getItem("autoWifiSsid") || "RTT / IEEE 802.11",
     password: localStorage.getItem("autoWifiPassword") || "1234qwer",
   },
@@ -186,7 +186,10 @@ app.innerHTML = `
         <div class="metric-row result-row"><span>Result:</span><button class="result-pill" id="resultPill" disabled>None</button></div>
       </section>
       <section class="suite-panel">
-        <div class="pane-head compact"><h2>SUITES</h2></div>
+        <div class="pane-head compact">
+          <h2>SUITES</h2>
+          <button class="mini-button" id="clearSuitesBtn">Clear</button>
+        </div>
         <div class="suite-list" id="suiteList"></div>
       </section>
       <footer class="status-line" id="statusLine">Standby</footer>
@@ -271,6 +274,7 @@ const els = {
   failedMetric: document.querySelector("#failedMetric"),
   runtimeMetric: document.querySelector("#runtimeMetric"),
   suiteList: document.querySelector("#suiteList"),
+  clearSuitesBtn: document.querySelector("#clearSuitesBtn"),
 };
 
 els.retryInput.value = state.retryCount;
@@ -284,6 +288,7 @@ els.clearLogBtn.addEventListener("click", () => {
   renderLog();
 });
 els.clearTableBtn.addEventListener("click", clearInactiveTableCards);
+els.clearSuitesBtn.addEventListener("click", clearInactiveSuites);
 els.unselectBtn.addEventListener("click", toggleAllReadyDevices);
 els.settingsBtn.addEventListener("click", openSettings);
 els.settingsCloseBtn.addEventListener("click", closeSettings);
@@ -846,11 +851,33 @@ function renderLaundryTableCard({ title, subtitle, rows, locked = false, active 
     `;
   }).join("");
 
+  const completedSuites = rows.filter((row) => row.status && ["Test Done", "Cancelled", "Failed", "Timeout", "Completed"].includes(row.status)).length;
+  const totalSuites = rows.length;
+  const pct = totalSuites > 0 ? (completedSuites / totalSuites) : 0;
+
+  const totalTestcases = rows.reduce((sum, row) => sum + (Number(row.total) || 0), 0);
+  const passedTestcases = rows.reduce((sum, row) => sum + (Number(row.passed) || 0), 0);
+  const failedTestcases = rows.reduce((sum, row) => sum + (Number(row.failed) || 0), 0);
+  const testedTestcases = passedTestcases + failedTestcases;
+
+  const progressHtml = locked ? `
+    <div class="flow-suite-progress">
+      <svg class="progress-ring" width="14" height="14">
+        <circle class="progress-ring__bg" stroke="rgba(255,255,255,0.1)" stroke-width="2" fill="transparent" r="5" cx="7" cy="7"/>
+        <circle class="progress-ring__circle" stroke="${pct === 1 ? 'var(--green)' : 'var(--cyan)'}" stroke-width="2" stroke-dasharray="31.4" stroke-dashoffset="${31.4 * (1 - pct)}" fill="transparent" r="5" cx="7" cy="7" stroke-linecap="round" transform="rotate(-90 7 7)"/>
+      </svg>
+      <span class="flow-suite-count" style="color: ${pct === 1 ? 'var(--green)' : 'var(--cyan)'}">${completedSuites}/${totalSuites} suite (${testedTestcases}/${totalTestcases} testcases)</span>
+    </div>
+  ` : "";
+
   return `
     <section class="laundry-table-card ${locked ? "locked" : ""} ${active ? "active" : ""}">
       <header class="laundry-table-head">
-        <strong>${escapeHtml(title)}</strong>
-        <span>${escapeHtml(subtitle)}</span>
+        <div class="laundry-table-head-left">
+          <strong>${escapeHtml(title)}</strong>
+          <span>${escapeHtml(subtitle)}</span>
+        </div>
+        ${progressHtml}
       </header>
       <div class="laundry-table-wrap">
         <table class="laundry-table">
@@ -916,8 +943,26 @@ function renderSuiteStatus() {
 
   els.suiteList.innerHTML = [...byRun.entries()].map(([runId, runStatuses]) => {
     const flow = state.flows.get(runId) || { mode: runStatuses[0]?.test_type || "Run", flow: "", devices: "" };
+    const sortedStatuses = [...runStatuses].sort(compareSuiteStatuses);
     const deviceModel = getDeviceModelsForFlow(flow);
-    const rows = runStatuses.map((status) => {
+    const completedSuites = sortedStatuses.filter((s) => ["Test Done", "Cancelled", "Failed", "Timeout", "Completed"].includes(s.status)).length;
+    const pct = sortedStatuses.length > 0 ? (completedSuites / sortedStatuses.length) : 0;
+
+    let totalTestcases = 0;
+    let passedTestcases = 0;
+    let failedTestcases = 0;
+    sortedStatuses.forEach((status) => {
+      const key = `${status.run_id || "legacy"}:${status.suite}:${status.devices || ""}`;
+      const summary = state.summaries.get(key);
+      if (summary) {
+        totalTestcases += Number(summary.total || 0);
+        passedTestcases += Number(summary.passed || 0);
+        failedTestcases += Number(summary.failed || 0);
+      }
+    });
+    const testedTestcases = passedTestcases + failedTestcases;
+
+    const rows = sortedStatuses.map((status) => {
       const key = `${status.run_id || "legacy"}:${status.suite}:${status.devices || ""}`;
       const summary = state.summaries.get(key);
       const failed = summary?.failed ?? "-";
@@ -945,13 +990,27 @@ function renderSuiteStatus() {
           <div class="flow-card-header-content">
             <strong>${escapeHtml(flow.mode)} Model ${escapeHtml(deviceModel)}</strong>
             <p class="flow-flow-text">${escapeHtml(flow.flow)}</p>
-            <span class="flow-suite-count">${runStatuses.length} suite</span>
+            <div class="flow-suite-progress">
+              <svg class="progress-ring" width="14" height="14">
+                <circle class="progress-ring__bg" stroke="rgba(255,255,255,0.1)" stroke-width="2" fill="transparent" r="5" cx="7" cy="7"/>
+                <circle class="progress-ring__circle" stroke="${pct === 1 ? 'var(--green)' : 'var(--cyan)'}" stroke-width="2" stroke-dasharray="31.4" stroke-dashoffset="${31.4 * (1 - pct)}" fill="transparent" r="5" cx="7" cy="7" stroke-linecap="round" transform="rotate(-90 7 7)"/>
+              </svg>
+              <span class="flow-suite-count" style="color: ${pct === 1 ? 'var(--green)' : 'var(--cyan)'}">${completedSuites}/${sortedStatuses.length} suite (${testedTestcases}/${totalTestcases} testcases)</span>
+            </div>
           </div>
         </header>
         <div class="flow-suite-list">${rows}</div>
       </div>
     `;
   }).join("");
+}
+
+function compareSuiteStatuses(a, b) {
+  const order = { CTS: 0, GTS: 1, STS: 2, ALL: 3 };
+  const suiteA = order[String(a.suite || "").toUpperCase()] ?? 99;
+  const suiteB = order[String(b.suite || "").toUpperCase()] ?? 99;
+  if (suiteA !== suiteB) return suiteA - suiteB;
+  return String(a.devices || "").localeCompare(String(b.devices || ""));
 }
 
 function renderMetrics() {
@@ -1023,17 +1082,50 @@ function shardSelectedDevices(devices, mode) {
 
 function shardLaundrySmrDevices(devices) {
   const groups = new Map();
+  
+  let hasCtsOrGts = false;
+  let hasSts = false;
+  if (state.selectedLaundryResults && state.selectedLaundryResults.size > 0) {
+    const selectedRows = state.laundryResults.filter(row => state.selectedLaundryResults.has(row.id));
+    hasCtsOrGts = selectedRows.some(row => {
+      const t = (row.testcase || "").toUpperCase();
+      return t.includes("CTS") || t.includes("GTS") || t.includes("COMPATIBILITY") || t.includes("GOOGLE");
+    });
+    hasSts = selectedRows.some(row => {
+      const t = (row.testcase || "").toUpperCase();
+      return t.includes("STS") || t.includes("SECURITY");
+    });
+  }
+
   devices.forEach((device) => {
     const family = fingerprintFamilyKey(device);
     const model = modelKey(device);
     const key = `${model}::${family}`;
-    if (!groups.has(key)) groups.set(key, { kind: "USER+USERDEBUG", fingerprint: family, model, devices: [] });
+    if (!groups.has(key)) groups.set(key, { kind: "", fingerprint: family, model, devices: [] });
     groups.get(key).devices.push(device);
   });
+  
   return [...groups.values()].filter((group) => {
     const hasUser = group.devices.some((device) => !device.is_userdebug);
     const hasUserdebug = group.devices.some((device) => device.is_userdebug);
-    return hasUser && hasUserdebug;
+    
+    let valid = false;
+    if (hasCtsOrGts && hasSts) {
+      valid = hasUser && hasUserdebug;
+    } else if (hasCtsOrGts) {
+      valid = hasUser;
+    } else if (hasSts) {
+      valid = hasUserdebug;
+    } else {
+      valid = hasUser || hasUserdebug;
+    }
+    
+    if (valid) {
+      if (hasUser && hasUserdebug) group.kind = "USER+USERDEBUG";
+      else if (hasUser) group.kind = "USER";
+      else group.kind = "USERDEBUG";
+    }
+    return valid;
   });
 }
 
@@ -1400,7 +1492,31 @@ function validateLaundrySmrSelection() {
   const selectedDevices = state.devices.filter((device) => state.selected.has(device.serial));
   const hasUser = selectedDevices.some((device) => !device.is_userdebug);
   const hasUserdebug = selectedDevices.some((device) => device.is_userdebug);
-  if (!hasUser || !hasUserdebug) return "Laundry SMR needs selected USER and USERDEBUG device cards.";
+  
+  if (state.selectedLaundryResults && state.selectedLaundryResults.size > 0) {
+    const selectedRows = state.laundryResults.filter(row => state.selectedLaundryResults.has(row.id));
+    const hasCtsOrGts = selectedRows.some(row => {
+      const t = (row.testcase || "").toUpperCase();
+      return t.includes("CTS") || t.includes("GTS") || t.includes("COMPATIBILITY") || t.includes("GOOGLE");
+    });
+    const hasSts = selectedRows.some(row => {
+      const t = (row.testcase || "").toUpperCase();
+      return t.includes("STS") || t.includes("SECURITY");
+    });
+    
+    if (hasCtsOrGts && hasSts) {
+      if (!hasUser || !hasUserdebug) return "Laundry SMR needs selected USER and USERDEBUG device cards.";
+    } else if (hasCtsOrGts) {
+      if (!hasUser) return "Laundry SMR needs selected USER device card for CTS/GTS.";
+    } else if (hasSts) {
+      if (!hasUserdebug) return "Laundry SMR needs selected USERDEBUG device card for STS.";
+    } else {
+      if (!hasUser && !hasUserdebug) return "Laundry SMR needs at least one device.";
+    }
+  } else {
+    if (!hasUser && !hasUserdebug) return "Laundry SMR needs at least one device.";
+  }
+
   const models = new Set(selectedDevices.map(modelKey));
   if (models.size > 1) return `Laundry SMR devices must use the same model: ${[...models].join(", ")}`;
   const families = new Set(selectedDevices.map(fingerprintFamilyKey));
@@ -1480,6 +1596,35 @@ function clearInactiveTableCards() {
   }
   appendLog("[runner] Cleared inactive table cards.");
   renderFlowMap();
+}
+
+function clearInactiveSuites() {
+  // Clear completed suite statuses
+  for (const [key, status] of [...state.suiteStatuses.entries()]) {
+    const runId = status.run_id || "legacy";
+    if (!state.activeRuns.has(runId)) {
+      state.suiteStatuses.delete(key);
+    }
+  }
+
+  // Clear matching summaries
+  for (const key of [...state.summaries.keys()]) {
+    const runId = key.split(":")[0];
+    if (!state.activeRuns.has(runId)) {
+      state.summaries.delete(key);
+    }
+  }
+
+  // Clear flows mapping
+  for (const runId of [...state.flows.keys()]) {
+    if (!state.activeRuns.has(runId)) {
+      state.flows.delete(runId);
+    }
+  }
+
+  appendLog("[runner] Cleared inactive suite cards.");
+  renderSuiteStatus();
+  renderMetrics();
 }
 
 function ensureLogSubtab(flowId, kind) {
