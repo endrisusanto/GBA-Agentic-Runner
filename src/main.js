@@ -240,8 +240,8 @@ app.innerHTML = `
           </div>
           <button class="icon-button" id="warningsCloseBtn" title="Close">×</button>
         </header>
-        <div class="warnings-content" style="max-height: 300px; overflow-y: auto; margin: 16px 0;">
-          <ul id="warningsList" style="list-style: none; padding: 0; margin: 0; font-family: var(--font-mono); font-size: 13px; color: var(--text-muted); line-height: 1.5; display: flex; flex-direction: column; gap: 8px;"></ul>
+        <div class="warnings-content" style="max-height: 300px; overflow-y: auto; padding: 0 16px; margin: 16px 0;">
+          <ul id="warningsList" style="list-style: none; padding: 0; margin: 0; font-family: var(--font-mono); font-size: 13px; color: var(--text-muted); line-height: 1.5; display: flex; flex-direction: column; gap: 8px; word-break: break-all; white-space: pre-wrap;"></ul>
         </div>
         <div class="settings-actions">
           <button class="run-button" id="warningsOkBtn">OK</button>
