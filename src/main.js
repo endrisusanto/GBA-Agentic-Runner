@@ -406,7 +406,12 @@ listen("gba-run-finished", (event) => {
   if (Number(payload.exit_code) === 0) startConfettiLoop();
   renderFlowMap();
   renderMetrics();
-  refreshDevices();
+});
+
+listen("gba-tool-error", (event) => {
+  const errorMsg = String(event.payload || "");
+  els.warningsList.innerHTML = `<li>${escapeHtml(errorMsg)}</li>`;
+  els.warningsModal.classList.remove("hidden");
 });
 
 init();
@@ -1323,7 +1328,12 @@ async function runSelected() {
     } catch (error) {
       state.activeRuns.delete(runId);
       clearLocalBusy(groupSerials);
-      appendLog(`[runner] Run failed for ${groupSerials.join(",")}: ${error}`);
+      const errorMsg = String(error);
+      appendLog(`[runner] Run failed for ${groupSerials.join(",")}: ${errorMsg}`);
+      if (errorMsg.includes("not found")) {
+        els.warningsList.innerHTML = `<li>${escapeHtml(errorMsg)}</li>`;
+        els.warningsModal.classList.remove("hidden");
+      }
     }
   }
 

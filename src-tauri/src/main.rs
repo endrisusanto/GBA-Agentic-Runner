@@ -233,11 +233,14 @@ fn list_devices() -> Result<Vec<DeviceInfo>, String> {
             String::new()
         };
 
+        let build_type = prop(&props, "ro.build.type").to_lowercase();
+        let is_userdebug = fingerprint.to_lowercase().contains("userdebug") || build_type.contains("userdebug");
+
         let busy_entry = busy.devices.get(&serial);
         devices.push(DeviceInfo {
             serial: serial.clone(),
             state,
-            is_userdebug: fingerprint.contains("userdebug"),
+            is_userdebug,
             fingerprint,
             security_patch: prop(&props, "ro.build.version.security_patch"),
             android: prop(&props, "ro.build.version.release"),
@@ -421,6 +424,9 @@ fn run_suite(
             Ok(code) => code,
             Err(err) => {
                 emit_log(&app, format!("[runner] {err}"));
+                if err.contains("not found") {
+                    let _ = app.emit("gba-tool-error", err.clone());
+                }
                 1
             }
         };
