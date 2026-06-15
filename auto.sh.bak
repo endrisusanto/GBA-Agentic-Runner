@@ -1,0 +1,706 @@
+#!/bin/bash
+
+# ==============================================================================
+#
+#   Skrip Otomatisasi Android Test Suite (CTS, GTS, STS)
+#
+#   Menggabungkan alur kerja spesifik per tipe tes dengan eksekusi paralel
+#   dan monitoring canggih.
+#
+#   Author: Gemini (diadaptasi dari prompt pengguna)
+#   Version: 12.9 (Custom Retry Count)
+#
+# ==============================================================================
+
+# -- Script Setup --
+set -euo pipefail
+
+# -- Global Constants & Konfigurasi --
+readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly RESULTS_DIR="${SCRIPT_DIR}/Results"
+readonly ENABLE_WIFI_CONNECTION=true
+readonly WIFI_SSID="RTT / IEEE 802.11"
+readonly WIFI_PASSWORD="1234qwer"
+readonly COLOR_GREEN=$'\033[0;32m'; readonly COLOR_YELLOW=$'\033[0;33m'; readonly COLOR_RED=$'\033[0;31m'
+readonly COLOR_BLUE=$'\033[0;34m'; readonly COLOR_NC=$'\033[0m'
+readonly REQUIRED_COMMANDS=("adb" "whiptail" "column" "java" "tput" "animate")
+readonly TEST_TIMEOUT=86400 # 24 jam
+readonly UNIQUE_SUFFIX=$(date +%Y%m%d_%H%M%S)
+
+# ==============================================================================
+#   FUNGSI-FUNGSI UTAMA
+# ==============================================================================
+
+# Fungsi untuk mencatat pesan ke terminal dan file log dengan timestamp
+log_message() {
+    local type="$1"; local message="$2"; local color="$COLOR_NC"
+    local timestamp; timestamp=$(date +'%Y-%m-%d %H:%M:%S')
+
+    case "$type" in INFO) color="$COLOR_GREEN" ;; WARN) color="$COLOR_YELLOW" ;; ERROR) color="$COLOR_RED" ;; STEP) color="$COLOR_BLUE" ;; esac
+
+    local formatted_message
+    formatted_message="$(printf "%s ${color}[%s]${COLOR_NC} %s\n" "$timestamp" "$type" "$message")"
+
+    if [ -n "${session_log_file:-}" ]; then
+        echo "${timestamp} [${type}] ${message}" >> "$session_log_file"
+    fi
+
+    echo -e "$formatted_message"
+}
+
+# Fungsi cleanup saat skrip dihentikan paksa
+cleanup() {
+    tput cnorm
+    echo -e "\n"
+    log_message "WARN" "Skrip dihentikan. Membersihkan semua proses latar belakang..."
+    local job_pids=$(jobs -p)
+    if [[ -n "$job_pids" ]]; then
+        kill -9 $job_pids &>/dev/null || true
+    fi
+    pkill -P $$ || true
+    exit 1
+}
+trap cleanup INT TERM
+
+# Fungsi untuk mengubah detik menjadi format HH:MM:SS
+format_duration() {
+    local total_seconds=$1
+    if ! [[ "$total_seconds" =~ ^[0-9]+$ ]]; then
+        total_seconds=0
+    fi
+    local h=$((total_seconds/3600))
+    local m=$(((total_seconds%3600)/60))
+    local s=$((total_seconds%60))
+    printf "%02d:%02d:%02d" $h $m $s
+}
+
+# Fungsi untuk mengekstrak dan menampilkan ringkasan dari log
+parse_and_log_summary() {
+    local log_file="$1"
+    local suite_name="$2"
+    declare -n summary_map_ref=$3
+
+    log_message "INFO" "Mengekstrak ringkasan untuk $suite_name dari $log_file..."
+
+    local summary_block
+    summary_block=$(sed -n '/=============== Summary ===============/,/============================================/p' "$log_file")
+
+    if [ -z "$summary_block" ]; then
+        log_message "WARN" "Blok ringkasan tidak ditemukan untuk $suite_name."
+        return
+    fi
+
+    local run_time=$(echo "$summary_block" | grep "Total Run time:" | sed -e 's/.*: //')
+    local modules=$(echo "$summary_block" | grep "modules completed" | sed -e 's/.*: //')
+    local total=$(echo "$summary_block" | grep "Total Tests" | grep -o '[0-9]\+' || echo "0")
+    local passed=$(echo "$summary_block" | grep "PASSED" | grep -o '[0-9]\+' || echo "0")
+    local failed=$(echo "$summary_block" | grep "FAILED" | grep -o '[0-9]\+' || echo "0")
+    local assumption=$(echo "$summary_block" | grep "ASSUMPTION_FAILURE" | grep -o '[0-9]\+' || echo "0")
+
+    summary_map_ref["run_time"]=$run_time
+    summary_map_ref["modules"]=$modules
+    summary_map_ref["total"]=$total
+    summary_map_ref["passed"]=$passed
+    summary_map_ref["failed"]=$failed
+    summary_map_ref["assumption"]=$assumption
+
+    echo ""
+    log_message "INFO" "--------------- Ringkasan Sesi $suite_name ---------------"
+    log_message "INFO" "Waktu Pengerjaan: ${run_time}"
+    log_message "INFO" "Modul Selesai: ${modules}"
+    log_message "INFO" "Total Tes: ${total}, Lulus: ${passed}, Gagal: ${failed}, Asumsi Gagal: ${assumption}"
+    log_message "INFO" "----------------------------------------------------"
+    echo ""
+}
+
+
+# Fungsi untuk menyambungkan perangkat ke jaringan Wi-Fi
+connect_to_wifi() {
+    local device_id="$1"
+    log_message "INFO" "Memulai koneksi Wi-Fi untuk perangkat $device_id..."
+    adb -s "$device_id" shell svc wifi enable
+
+    local retries=15
+    log_message "INFO" "Menunggu Wi-Fi aktif di $device_id..."
+    while [[ $(adb -s "$device_id" shell dumpsys wifi | grep "Wi-Fi is") != *"enabled"* && $retries -gt 0 ]]; do
+        sleep 1; ((retries--))
+    done
+
+    if [[ $retries -eq 0 ]]; then log_message "ERROR" "Gagal mengaktifkan Wi-Fi di $device_id."; return 1; fi
+    log_message "INFO" "Wi-Fi berhasil diaktifkan di $device_id."
+
+    log_message "STEP" "Menyambungkan $device_id ke jaringan '${WIFI_SSID}'..."
+    adb -s "$device_id" shell cmd wifi connect-network "$WIFI_SSID" wpa2 "$WIFI_PASSWORD"
+
+    log_message "INFO" "Memverifikasi koneksi ke '${WIFI_SSID}'..."
+    local connect_retries=30
+    while ! adb -s "$device_id" shell dumpsys wifi | grep -q "SSID: \"${WIFI_SSID}\""; do
+        sleep 1; ((connect_retries--))
+        if [[ $connect_retries -eq 0 ]]; then log_message "ERROR" "Gagal terhubung ke Wi-Fi '${WIFI_SSID}' di $device_id."; return 1; fi
+    done
+
+    local ip_address
+    ip_address=$(adb -s "$device_id" shell ip -f inet addr show wlan0 | grep -Po 'inet \K[\d.]+')
+    log_message "INFO" "Perangkat $device_id terhubung ke '${WIFI_SSID}' dengan IP: ${ip_address:-Tidak diketahui}"
+    return 0
+}
+
+# Fungsi untuk menunggu perangkat yang terputus
+wait_for_device_reconnect() {
+    local device_id="$1"
+    printf "\r$(tput el)\r"
+    log_message "WARN" "Perangkat $device_id terputus. Menjeda dan menunggu koneksi kembali..."
+    tput civis
+    local spinner_chars=("🌑" "🌒" "🌓" "🌔" "🌕" "🌖" "🌗" "🌘")
+    local i=0
+    while ! adb devices | grep -qw "$device_id"; do
+        printf "\r${COLOR_YELLOW}[TUNGGU]${COLOR_NC} Menunggu koneksi ulang untuk ${device_id} ${spinner_chars[i++ % ${#spinner_chars[@]}]}"
+        sleep 0.1
+    done
+    printf "\r$(tput el)\r"
+    log_message "INFO" "Perangkat $device_id terhubung kembali."
+    log_message "STEP" "Memberi jeda 5 detik agar perangkat stabil..."
+    sleep 5
+    tput cnorm
+}
+
+# Fungsi untuk menyalin hasil tes dengan aman
+safe_copy_result() {
+    local source_dir="$1"; local destination_zip="$2"; local test_suite_name="$3"; local log_file="$4"
+    shopt -s nullglob
+    local source_files=(${source_dir}/*.zip)
+    shopt -u nullglob
+    if [ ${#source_files[@]} -gt 0 ]; then
+        cp "${source_files[0]}" "$destination_zip" 2>> "$log_file" || log_message "WARN" "Gagal menyalin hasil untuk $test_suite_name"
+        echo ""
+        log_message "INFO" "======================== Result/Log Location =========================="
+        log_message "INFO" "Hasil $test_suite_name disimpan di: $destination_zip"
+    else
+        log_message "ERROR" "Tidak ditemukan file hasil .zip di ${source_dir} untuk tes $test_suite_name."
+    fi
+}
+
+# Fungsi untuk membuat file ro.xml dari properti perangkat
+generate_ro_xml(){
+    local device_id="$1"; local result_dir="$2"; local ro_xml_file="${result_dir}/ro_${device_id}.xml"
+    log_message "INFO" "Membuat file ro.xml untuk perangkat $device_id..."
+    local properties=("ro.build.fingerprint" "ro.build.version.base_os" "ro.build.version.security_patch" "ro.build.PDA" "ril.sw_ver" "ril.official_cscver" "ro.product.first_api_level" "ro.sts.property" "ro.system.build.fingerprint" "ro.vendor.build.fingerprint" "ro.product.build.version.sdk" "partition.system.verified.root_digest" "partition.vendor.verified.root_digest" "partition.system_dlkm.verified.root_digest" "partition.vendor_dlkm.verified.root_digest" "partition.odm.verified.root_digest" "partition.product.verified.root_digest" "ro.build.characteristics" "partition.system_ext.verified.root_digest")
+    echo -e "<RO>\n" > "$ro_xml_file"
+    for prop in "${properties[@]}"; do
+        local value=$(adb -s "$device_id" shell getprop "$prop" | tr -d '\r\n' | cat -v | sed 's/\^M//')
+        echo -e "    <$prop>$value</$prop>" >> "$ro_xml_file"
+    done
+    local features=$(adb -s "$device_id" shell pm list features)
+    if echo "$features" | grep -q "feature:android.hardware.type.watch"; then echo -e "\n    <isWatch>true</isWatch>" >> "$ro_xml_file"; else echo -e "\n    <isWatch>false</isWatch>" >> "$ro_xml_file"; fi
+    echo -e "\n    <ro.version>2.0</ro.version>\n</RO>" >> "$ro_xml_file"
+    log_message "INFO" "File ro.xml berhasil dibuat di: $ro_xml_file"
+}
+
+# Fungsi untuk memverifikasi keberadaan file subplan
+verify_plan_file_exists(){
+    local suite_root_dir="$1"; local plan_name="$2"; local suite_name="$3"
+    log_message "STEP" "Memverifikasi file untuk subplan '$plan_name' di $suite_name..."
+
+    local subplan_path="${suite_root_dir}/subplans/${plan_name}.xml"
+
+    if [ -f "$subplan_path" ]; then
+        log_message "INFO" "Subplan '$plan_name' DITEMUKAN di: $subplan_path";
+        return 0;
+    fi
+
+    log_message "ERROR" "File untuk subplan '$plan_name' TIDAK DITEMUKAN di lokasi yang diharapkan: '$subplan_path'.";
+    return 1
+}
+
+# Fungsi untuk memeriksa dependensi
+check_dependencies(){
+    log_message "STEP" "Memeriksa dependensi..."; for cmd in "${REQUIRED_COMMANDS[@]}"; do
+    if ! command -v "$cmd" &> /dev/null; then log_message "ERROR" "Perintah '$cmd' tidak ditemukan."; exit 1; fi; done
+    log_message "INFO" "Semua dependensi terpenuhi."; log_message "INFO" "Menggunakan Java sistem: $(java -version 2>&1 | head -n 1)"
+}
+
+# Fungsi untuk menampilkan menu TUI utama
+select_test_type(){
+    whiptail --title "Seleksi Tipe Tes" --menu "Pilih tipe tes yang akan dijalankan:" 16 70 5 \
+        "Cuci SMR" "CTS SMR -> GTS SMR (Non-Userdebug)" \
+        "MR" "Maintenance Release (CTS -> GTS)" \
+        "SMR" "Security Maintenance Release (CTS+STS -> GTS)" \
+        "SKU" "SKU Build (CTS -> GTS)" \
+        "STS" "Security Test Suites (Hanya STS)" 3>&1 1>&2 2>&3
+}
+
+# --- DIMODIFIKASI --- Menambahkan inputbox untuk jumlah retry
+select_retry_option() {
+    local choice
+    choice=$(whiptail --title "Opsi Tambahan" --menu "Gunakan argumen retry otomatis?" 15 120 2 \
+        "Ya" "Gunakan --enable-token-sharding --max-testcase-run-count --retry-strategy RETRY_ANY_FAILURE" \
+        "Tidak" "Jalankan tes tanpa retry otomatis." 3>&1 1>&2 2>&3)
+
+    if [[ "$choice" == "Ya" ]]; then
+        local count
+        count=$(whiptail --inputbox "Masukkan jumlah --max-testcase-run-count :" 10 60 "5" 3>&1 1>&2 2>&3)
+        # Jika pengguna menekan cancel atau input kosong, gunakan default 5
+        if [[ -z "$count" ]]; then
+            echo "5"
+        else
+            echo "$count"
+        fi
+    else
+        echo "0" # Mengembalikan 0 untuk menandakan tidak ada retry
+    fi
+}
+
+# Fungsi untuk mendapatkan dan memfilter perangkat yang terhubung
+get_filtered_devices(){
+    local test_type="$1"; declare -n out_table=$2; log_message "STEP" "Mencari dan memfilter perangkat untuk '$test_type'..."
+    local devices; mapfile -t devices < <(adb devices | awk 'NR>1 && /device$/ {print $1}')
+    if [ ${#devices[@]} -eq 0 ]; then log_message "ERROR" "Tidak ada perangkat ADB."; exit 1; fi
+    for device_id in "${devices[@]}"; do
+        local props=$(adb -s "$device_id" shell "getprop ro.build.fingerprint; getprop ro.build.version.security_patch; getprop ro.build.version.release; getprop ro.csc.sales_code; getprop ro.product.model; getprop ro.build.PDA; getprop ril.sw_ver; getprop ril.official_cscver;")
+        props=$(echo "$props" | tr -d '\r'); mapfile -t prop_lines <<< "$props"
+        local fingerprint="${prop_lines[0]}"; local is_userdebug=false
+        if [[ "$fingerprint" == *"userdebug"* ]]; then is_userdebug=true; fi
+
+        local should_add=false
+        if [[ "$test_type" == "SMR" ]]; then should_add=true;
+        elif [[ ("$test_type" == "STS") && "$is_userdebug" == true ]]; then should_add=true;
+        elif [[ ("$test_type" == "MR" || "$test_type" == "SKU" || "$test_type" == "Cuci SMR") && "$is_userdebug" == false ]]; then should_add=true; fi
+
+        if [[ "$should_add" == true ]]; then
+            out_table+=("$device_id" "${prop_lines[0]}" "${prop_lines[1]}" "${prop_lines[2]}" "${prop_lines[3]}" "${prop_lines[4]}" "${prop_lines[5]}" "${prop_lines[6]}" "${prop_lines[7]}");
+        fi
+    done
+}
+
+# Fungsi untuk memilih perangkat dari tabel dan memvalidasi model yang sama
+select_devices_from_table(){
+    local prompt_message="$1"; local -n table=$2; declare -n out_selected_devices=$3; declare -n out_selected_models=$4; declare -n out_selected_pdas=$5
+
+    while true; do
+        out_selected_devices=(); out_selected_models=(); out_selected_pdas=()
+
+        if [ ${#table[@]} -eq 0 ]; then log_message "ERROR" "Tidak ada perangkat yang cocok ditemukan untuk: $prompt_message"; return 1; fi
+
+        printf "\n${COLOR_BLUE}Daftar Perangkat yang Tersedia untuk ${prompt_message}:${COLOR_NC}\n"
+        ( printf "%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n" "No" "Device ID" "Fingerprint" "SPL" "OS" "Sales_Code" "Model" "AP_Version" "CP_Version" "CSC_Version"
+          for ((i=0; i<${#table[@]}; i+=9)); do
+            printf "%s|%s|%s|%s|%s|%s|%s|%s|%s|%s\n" "$((i/9+1))" "${table[i+0]}" "${table[i+1]}" "${table[i+2]}" "${table[i+3]}" "${table[i+4]}" "${table[i+5]}" "${table[i+6]}" "${table[i+7]}" "${table[i+8]}"
+          done
+        ) | column -t -s "|" -o " | "; read -p "Pilih nomor perangkat (misal: 1 atau 1,2,3): " input
+
+        if [[ -z "$input" ]]; then log_message "WARN" "Tidak ada input. Coba lagi."; continue; fi
+
+        IFS=',' read -ra selected_indices <<< "$input"; local dev_count=$(( ${#table[@]} / 9 ))
+        for idx_str in "${selected_indices[@]}"; do
+            local idx=$((idx_str - 1))
+            if [[ "$idx" -lt 0 || "$idx" -ge "$dev_count" ]]; then log_message "ERROR" "Nomor perangkat tidak valid: $idx_str"; continue 2; fi
+            out_selected_devices+=("${table[$((idx * 9 + 0))]}")
+            out_selected_models+=("${table[$((idx * 9 + 5))]}")
+            out_selected_pdas+=("${table[$((idx * 9 + 6))]}")
+        done
+
+        if [ ${#out_selected_devices[@]} -eq 0 ]; then log_message "WARN" "Tidak ada perangkat yang dipilih. Coba lagi."; continue; fi
+
+        local first_model="${out_selected_models[0]}"
+        local all_same_model=true
+        for model in "${out_selected_models[@]}"; do
+            if [[ "$model" != "$first_model" ]]; then
+                all_same_model=false; break
+            fi
+        done
+
+        if [[ "$all_same_model" == true ]]; then
+            break
+        else
+            whiptail --title "Model Berbeda" --msgbox "Peringatan: Anda memilih perangkat dengan model yang berbeda. Pengetesan sharding memerlukan model yang sama.\n\nHarap pilih kembali perangkat dengan model yang identik." 12 70
+        fi
+    done
+    return 0
+}
+
+# Fungsi untuk menampilkan informasi detail perangkat yang dipilih
+display_device_info() {
+    declare -n devices_ref=$1
+    log_message "STEP" "Detail Perangkat yang Dipilih:"
+
+    local header="Device_ID|IP_Address|OS_Version|SPL"
+    local body=""
+    for device_id in "${devices_ref[@]}"; do
+        local ip_addr=$(adb -s "$device_id" shell ip -f inet addr show wlan0 | grep -Po 'inet \K[\d.]+' || echo "N/A")
+        local os_ver=$(adb -s "$device_id" shell getprop ro.build.version.release | tr -d '\r')
+        local spl=$(adb -s "$device_id" shell getprop ro.build.version.security_patch | tr -d '\r')
+        body+="${device_id}|${ip_addr}|${os_ver}|${spl}\n"
+    done
+
+    (echo -e "$header"; echo -e "$body") | column -t -s "|"
+}
+
+# Fungsi untuk mempersiapkan perangkat
+prepare_device(){
+    local device_id="$1"
+    if ! adb devices | grep -qw "$device_id"; then wait_for_device_reconnect "$device_id"; fi
+    log_message "INFO" "Mempersiapkan perangkat $device_id..."
+    adb -s "$device_id" root &>/dev/null || true; sleep 1; adb -s "$device_id" unroot &>/dev/null || true; sleep 1
+    adb -s "$device_id" wait-for-device; sleep 2
+    adb -s "$device_id" shell settings put global stay_on_while_plugged_in 3
+    adb -s "$device_id" shell wm dismiss-keyguard
+    log_message "INFO" "Perangkat $device_id siap."
+}
+
+# Fungsi untuk menjalankan tradefed via pipe
+start_tradefed_via_pipe(){
+    local full_command_str="$1"; local tradefed_executable="$2"; local log_file="$3"
+    (echo "$full_command_str"; sleep "$TEST_TIMEOUT") | "$tradefed_executable" &> "$log_file" &
+    echo $!
+}
+
+# Fungsi untuk menjalankan tradefed via argumen
+start_tradefed_via_args(){
+    local full_command_str="$1"; local tradefed_executable="$2"; local log_file="$3"
+    "$tradefed_executable" $full_command_str &> "$log_file" &
+    echo $!
+}
+
+# Fungsi utama untuk memonitor tes yang berjalan
+wait_and_process_tests() {
+    declare -n pids_ref=$1; declare -n names_ref=$2; declare -n devices_ref=$3; declare -n logs_ref=$4; declare -n starts_ref=$5
+    declare -n pending_gts_ref=$6; declare -n session_dir_ref=$7;
+    local zip_base_name_ref="$8";
+    local log_file="$9"
+    declare -n durations_ref=${10}
+    declare -n summaries_ref=${11}
+
+    tput civis
+    local spinner_chars_cat=("😺" "😸" "😹" "😻" "😼" "😽" "🙀" "😿" "😾" "🐾")
+    local spinner_idx=0
+    local start_wait_time=$(date +%s)
+
+    while [ ${#pids_ref[@]} -gt 0 ]; do
+        local current_time=$(date +%s)
+        local still_active_indices=()
+        local completed_jobs_this_tick=()
+
+        local newly_started_pids=()
+        local newly_started_names=()
+        local newly_started_devices=()
+        local newly_started_logs=()
+        local newly_started_starts=()
+
+        for i in "${!pids_ref[@]}"; do
+            local pid="${pids_ref[$i]}"; local final_status=""
+
+            local device_list_str="${devices_ref[$i]}"
+            IFS=',' read -ra device_array_to_check <<< "$device_list_str"
+            for device_to_check in "${device_array_to_check[@]}"; do
+                if ! adb devices 2>> "$log_file" | grep -qw "$device_to_check"; then
+                    wait_for_device_reconnect "$device_to_check"; tput civis
+                fi
+            done
+
+            if tail -n 50 "${logs_ref[$i]}" | grep -q "Result/Log Location"; then final_status="Selesai (Hasil Ditemukan)"
+            elif ! ps -p "$pid" > /dev/null; then final_status="Selesai (Proses Hilang)"
+            elif [ "$((current_time - starts_ref[$i]))" -gt "$TEST_TIMEOUT" ]; then final_status="Gagal (Batas Waktu)"; fi
+
+            if [[ -n "$final_status" ]]; then
+                printf "\r$(tput el)\r"
+                local duration=$((current_time - starts_ref[$i]))
+                local key="${names_ref[$i]},${devices_ref[$i]}"
+                durations_ref["$key"]=$duration
+
+                # Parsing summary tetap dilakukan untuk logging, namun tidak akan ditampilkan di akhir
+                declare -A summary_data
+                parse_and_log_summary "${logs_ref[$i]}" "${names_ref[$i]}" summary_data
+                summaries_ref["$key"]="run_time:${summary_data[run_time]}|modules:${summary_data[modules]}|total:${summary_data[total]}|passed:${summary_data[passed]}|failed:${summary_data[failed]}|assumption:${summary_data[assumption]}"
+
+                log_message "INFO" "Tes ${names_ref[$i]} pada grup perangkat [${devices_ref[$i]}]... ${final_status} (Waktu: $(format_duration "$duration"))"
+                completed_jobs_this_tick+=("$i")
+            else
+                still_active_indices+=("$i")
+            fi
+        done
+
+        if [ ${#still_active_indices[@]} -gt 0 ] || [ ${#newly_started_pids[@]} -gt 0 ]; then
+            local total_active_jobs=$(( ${#still_active_indices[@]} + ${#newly_started_pids[@]} ))
+            local elapsed=$((current_time - start_wait_time))
+            local h=$((elapsed/3600)); local m=$(((elapsed%3600)/60)); local s=$((elapsed%60))
+            spinner_idx=$(((spinner_idx + 1) % ${#spinner_chars_cat[@]}))
+            local spinner=${spinner_chars_cat[$spinner_idx]}
+            local timestamp; timestamp=$(date +'%Y-%m-%d %H:%M:%S')
+            printf "\r%s ${COLOR_BLUE}[STEP]${COLOR_NC} ${COLOR_YELLOW}%s${COLOR_NC} Menunggu ${total_active_jobs} sesi tes untuk selesai. Waktu berjalan: %02d:%02d:%02d " "$timestamp" "$spinner" $h $m $s
+        fi
+
+        for i in "${completed_jobs_this_tick[@]}"; do
+            local pid="${pids_ref[$i]}"; local device_list_str="${devices_ref[$i]}"; local name="${names_ref[$i]}"
+
+            local first_device_in_group=${device_list_str%%,*}
+            if ! adb devices 2>> "$log_file" | grep -qw "$first_device_in_group"; then
+                log_message "WARN" "Perangkat utama [$first_device_in_group] dari grup perangkat [$device_list_str] terputus. Melewatkan hasil."
+                if [[ -v pending_gts_ref[$pid] ]]; then unset "pending_gts_ref[$pid]"; fi; continue
+            fi
+
+            local version=$(adb -s "$first_device_in_group" shell getprop ro.build.version.release | tr -d '\r')
+            local security_patch=$(adb -s "$first_device_in_group" shell getprop ro.build.version.security_patch | tr -d '\r')
+            local sts_folder=$(date -d "$security_patch" +%m 2>/dev/null || date +%m)
+            local root_dir=""
+            case "$name" in
+                CTS) root_dir="CTS/${version:0:2}/android-cts" ;;
+                GTS) root_dir="GTS/android-gts" ;;
+                STS) root_dir="STS/${sts_folder}/${version:0:2}/android-sts" ;;
+            esac
+
+            local temp_results_dir="${root_dir}/results_${name,,}_${first_device_in_group}_${UNIQUE_SUFFIX}"
+
+            if [ -d "${root_dir}/results" ]; then
+                mv "${root_dir}/results" "$temp_results_dir" 2>> "$log_file" || log_message "WARN" "Gagal memindahkan ${root_dir}/results."
+            fi
+
+            local safe_device_list_for_filename="${device_list_str//,/_}"
+            safe_copy_result "$temp_results_dir" "${session_dir_ref}/${name}_${zip_base_name_ref}_${safe_device_list_for_filename}.zip" "$name" "$log_file"
+
+            if [[ -v pending_gts_ref[$pid] ]]; then
+                local gts_info_string=${pending_gts_ref[$pid]}; unset "pending_gts_ref[$pid]"
+                local gts_device_list_str=${gts_info_string%%|*}; local gts_base_cmd=${gts_info_string#*|}
+                log_message "INFO" "CTS pada grup perangkat [$device_list_str] selesai, memulai GTS pada grup yang sama..."
+
+                local gts_root="GTS/android-gts"
+                if [ ! -d "$gts_root" ]; then log_message "ERROR" "Direktori '$gts_root' tidak ditemukan! Melewatkan tes GTS."; continue; fi
+
+                IFS=',' read -ra gts_device_array <<< "$gts_device_list_str"
+                local gts_shard_count=${#gts_device_array[@]}
+                local gts_serial_args=""; for dev in "${gts_device_array[@]}"; do gts_serial_args+=" --serial $dev"; done
+                local gts_log="${session_dir_ref}/Log/gts_run_sharded_${gts_shard_count}devs.log"
+                local gts_cmd="$gts_base_cmd --shard-count $gts_shard_count${gts_serial_args} ${RETRY_ARGS}"
+                log_message "INFO" "Perintah GTS yang dijalankan: $gts_cmd"
+
+                local gts_pid=$(start_tradefed_via_pipe "$gts_cmd" "${gts_root}/tools/gts-tradefed" "$gts_log")
+
+                newly_started_pids+=("$gts_pid"); newly_started_names+=("GTS"); newly_started_devices+=("$gts_device_list_str"); newly_started_logs+=("$gts_log"); newly_started_starts+=("$(date +%s)")
+            fi
+        done
+
+        local next_pids=(); local next_names=(); local next_devices=(); local next_logs=(); local next_starts=()
+        for i in "${still_active_indices[@]}"; do
+            next_pids+=("${pids_ref[$i]}"); next_names+=("${names_ref[$i]}"); next_devices+=("${devices_ref[$i]}")
+            next_logs+=("${logs_ref[$i]}"); next_starts+=("${starts_ref[$i]}")
+        done
+
+        pids_ref=("${next_pids[@]}" "${newly_started_pids[@]}")
+        names_ref=("${next_names[@]}" "${newly_started_names[@]}")
+        devices_ref=("${next_devices[@]}" "${newly_started_devices[@]}")
+        logs_ref=("${next_logs[@]}" "${newly_started_logs[@]}")
+        starts_ref=("${next_starts[@]}" "${newly_started_starts[@]}")
+
+        sleep 0.2
+    done
+
+    echo ""
+    tput cnorm
+}
+
+# --- DIMODIFIKASI ---
+# Fungsi untuk menampilkan ringkasan waktu tes (tanpa detail hasil)
+display_summary() {
+    declare -n durations_ref=$1
+    local total_cts_time=0 total_gts_time=0 total_sts_time=0
+
+    log_message "INFO" "======================= Ringkasan Waktu Pengetesan ========================"
+
+    for key in "${!durations_ref[@]}"; do
+        local suite_name=${key%%,*}
+        local duration=${durations_ref[$key]}
+        case "$suite_name" in
+            CTS) ((total_cts_time+=duration)) ;;
+            GTS) ((total_gts_time+=duration)) ;;
+            STS) ((total_sts_time+=duration)) ;;
+        esac
+    done
+
+    if [[ $total_cts_time -gt 0 ]]; then log_message "INFO" "Total Waktu CTS: $(format_duration $total_cts_time)"; fi
+    if [[ $total_gts_time -gt 0 ]]; then log_message "INFO" "Total Waktu GTS: $(format_duration $total_gts_time)"; fi
+    if [[ $total_sts_time -gt 0 ]]; then log_message "INFO" "Total Waktu STS: $(format_duration $total_sts_time)"; fi
+
+    local grand_total_time=$((total_cts_time + total_gts_time + total_sts_time))
+    log_message "INFO" "-----------------------------------------------------------------------"
+    log_message "INFO" "Total Waktu Keseluruhan: $(format_duration $grand_total_time)"
+    log_message "INFO" "======================================================================="
+
+    # Bagian "Ringkasan Hasil Tes Rinci" dan "Ringkasan Hasil Total" telah dihapus sesuai permintaan.
+}
+
+# ==============================================================================
+#   ALUR EKSEKUSI UTAMA
+# ==============================================================================
+main() {
+    check_dependencies
+    local test_type=$(select_test_type) || { log_message "WARN" "Keluar."; exit 1; }
+    log_message "INFO" "Tipe tes yang dipilih: $test_type"
+
+    local retry_count=$(select_retry_option)
+    local RETRY_ARGS=""
+    if [[ "$retry_count" -gt 0 ]]; then
+        RETRY_ARGS="--enable-token-sharding --max-testcase-run-count ${retry_count} --retry-strategy RETRY_ANY_FAILURE"
+        log_message "INFO" "Argumen retry otomatis diaktifkan dengan ${retry_count} percobaan."
+    else
+        log_message "INFO" "Argumen retry otomatis tidak digunakan."
+    fi
+
+    local user_devices=() user_models=() user_pdas=()
+    local userdebug_devices=() userdebug_models=() userdebug_pdas=()
+
+    if [[ "$test_type" == "SMR" ]]; then
+        log_message "STEP" "SMR memerlukan perangkat user dan userdebug."
+        local all_device_table=(); get_filtered_devices "$test_type" all_device_table
+        local user_table=(); local userdebug_table=()
+        for ((i=0; i<${#all_device_table[@]}; i+=9)); do
+            if [[ "${all_device_table[$i+1]}" == *"userdebug"* ]]; then
+                userdebug_table+=("${all_device_table[@]:i:9}")
+            else
+                user_table+=("${all_device_table[@]:i:9}")
+            fi
+        done
+        select_devices_from_table "NON-USERDEBUG (untuk CTS/GTS)" user_table user_devices user_models user_pdas || exit 1
+        select_devices_from_table "USERDEBUG (untuk STS)" userdebug_table userdebug_devices userdebug_models userdebug_pdas || exit 1
+    else
+        local device_table=(); get_filtered_devices "$test_type" device_table;
+        if [[ "$test_type" == "STS" ]]; then
+             select_devices_from_table "USERDEBUG" device_table userdebug_devices userdebug_models userdebug_pdas || exit 1
+        else # MR, SKU, Cuci SMR
+             select_devices_from_table "NON-USERDEBUG" device_table user_devices user_models user_pdas || exit 1
+        fi
+    fi
+
+    local all_selected_devices=("${user_devices[@]}" "${userdebug_devices[@]}")
+    if [ ${#all_selected_devices[@]} -eq 0 ]; then log_message "ERROR" "Tidak ada perangkat yang dipilih. Keluar."; exit 1; fi
+    log_message "INFO" "Total perangkat yang diuji: ${#all_selected_devices[@]} (${all_selected_devices[*]})"
+
+    if [[ "$ENABLE_WIFI_CONNECTION" == true ]]; then
+        log_message "STEP" "Memulai proses koneksi Wi-Fi..."
+        for device_id in "${all_selected_devices[@]}"; do
+            connect_to_wifi "$device_id" || log_message "WARN" "Melanjutkan tes meskipun koneksi Wi-Fi untuk $device_id gagal."
+        done
+    fi
+
+    display_device_info all_selected_devices
+
+    local first_model="${user_models[0]:-${userdebug_models[0]}}"
+    local first_pda="${user_pdas[0]:-${userdebug_pdas[0]}}"
+    local session_name="${test_type}_${first_model}_${first_pda}_${#all_selected_devices[@]}devs_${UNIQUE_SUFFIX}"
+    local session_result_dir="${RESULTS_DIR}/${session_name}"
+    local session_log_subdir="${session_result_dir}/Log"
+    mkdir -p "$session_result_dir" "$session_log_subdir"
+
+    export session_log_file="${session_result_dir}/session_run.log"
+    echo "--- Log Sesi Tes Otomatis v12.8 ---" > "$session_log_file"
+    log_message "INFO" "Sesi dimulai. Hasil akan disimpan di: $session_result_dir"
+
+    if [ ${#user_devices[@]} -gt 0 ]; then
+        generate_ro_xml "${user_devices[0]}" "$session_result_dir"
+    fi
+
+    for device_id in "${all_selected_devices[@]}"; do prepare_device "$device_id"; done
+
+    log_message "STEP" "Memulai alur kerja untuk tes tipe: $test_type"
+    local pids=() names=() devices=() log_files=() start_times=()
+    declare -A pending_gts_jobs
+    declare -A all_durations
+    declare -A all_summaries
+
+    local cts_subplan="" gts_base_cmd=""
+    local run_cts=false run_gts=false run_sts=false
+
+    case "$test_type" in
+        "Cuci SMR") run_cts=true; run_gts=true; cts_subplan="ctssmr"; gts_base_cmd="run gts --subplan gtssmr";;
+        MR) run_cts=true; run_gts=true; cts_subplan="normal"; gts_base_cmd="run gts --subplan normal";;
+        SMR) run_cts=true; run_gts=true; run_sts=true; cts_subplan="ctssmr"; gts_base_cmd="run gts --subplan gtssmr";;
+        SKU) run_cts=true; run_gts=true; cts_subplan="ctssku"; gts_base_cmd="run gts-variant";;
+        STS) run_sts=true;;
+    esac
+
+    if [[ "$run_cts" == true ]]; then
+        local first_device=${user_devices[0]}
+        local version=$(adb -s "$first_device" shell getprop ro.build.version.release | tr -d '\r')
+        local cts_root="CTS/${version:0:2}/android-cts"
+
+        if [ ! -d "$cts_root" ]; then
+            log_message "ERROR" "Direktori CTS untuk Android ${version:0:2} tidak ditemukan. Pastikan path '$cts_root' ada."
+            exit 1
+        fi
+        log_message "INFO" "Menggunakan direktori CTS: $cts_root"
+
+        if ! verify_plan_file_exists "$cts_root" "$cts_subplan" "CTS"; then exit 1; fi
+
+        local shard_count=${#user_devices[@]}
+        local serial_args=""; for dev in "${user_devices[@]}"; do serial_args+=" --serial $dev"; done
+
+        local cts_log="${session_log_subdir}/cts_run_${user_models[0]}_${shard_count}devs.log"
+        local cts_cmd="run cts --subplan $cts_subplan --shard-count $shard_count${serial_args} ${RETRY_ARGS}"
+        log_message "INFO" "Perintah CTS: $cts_cmd"
+
+        local cts_pid=$(start_tradefed_via_pipe "$cts_cmd" "${cts_root}/tools/cts-tradefed" "$cts_log")
+        pids+=("$cts_pid"); names+=("CTS"); devices+=("$(IFS=,; echo "${user_devices[*]}")"); log_files+=("$cts_log"); start_times+=("$(date +%s)")
+        if [[ "$run_gts" == true ]]; then
+            pending_gts_jobs[$cts_pid]="$(IFS=,; echo "${user_devices[*]}")|${gts_base_cmd}"
+        fi
+        log_message "INFO" "Tes CTS untuk grup '${user_models[0]}' dimulai (PID: $cts_pid)"
+    fi
+
+    if [[ "$run_sts" == true ]]; then
+        local first_device=${userdebug_devices[0]}
+        local version=$(adb -s "$first_device" shell getprop ro.build.version.release | tr -d '\r')
+        local security_patch=$(adb -s "$first_device" shell getprop ro.build.version.security_patch | tr -d '\r')
+        local sts_folder=$(date -d "$security_patch" +%m 2>/dev/null || date +%m)
+        local sts_root="STS/${sts_folder}/${version:0:2}/android-sts"
+
+        if [ ! -d "$sts_root" ]; then
+            log_message "ERROR" "Direktori STS untuk SPL $sts_folder dan OS ${version:0:2} tidak ditemukan. Pastikan path '$sts_root' ada."
+            exit 1
+        fi
+        log_message "INFO" "Menggunakan direktori STS: $sts_root"
+
+        local shard_count=${#userdebug_devices[@]}
+        local serial_args=""; for dev in "${userdebug_devices[@]}"; do serial_args+=" --serial $dev"; done
+
+        local sts_log="${session_log_subdir}/sts_run_${userdebug_models[0]}_${shard_count}devs.log"
+        local sts_cmd="run sts-dynamic-incremental --shard-count $shard_count${serial_args} ${RETRY_ARGS}"
+        log_message "INFO" "Perintah STS: $sts_cmd"
+
+        local sts_pid=$(start_tradefed_via_args "$sts_cmd" "${sts_root}/tools/sts-tradefed" "$sts_log")
+        pids+=("$sts_pid"); names+=("STS"); devices+=("$(IFS=,; echo "${userdebug_devices[*]}")"); log_files+=("$sts_log"); start_times+=("$(date +%s)")
+        log_message "INFO" "Tes STS untuk grup '${userdebug_models[0]}' dimulai (PID: $sts_pid)"
+    fi
+
+    if [ ${#pids[@]} -gt 0 ]; then
+        log_message "STEP" "Memasuki loop monitoring untuk semua sesi tes yang berjalan..."
+        wait_and_process_tests pids names devices log_files start_times pending_gts_jobs session_result_dir "${first_model}_${first_pda}" "$session_log_file" all_durations all_summaries
+    else
+        log_message "WARN" "Tidak ada tes yang dijadwalkan untuk berjalan."
+    fi
+
+    # --- DIMODIFIKASI ---
+    # Memanggil display_summary hanya dengan durasi
+    display_summary all_durations
+
+    echo ""
+    log_message "INFO" "======================== Yay Selesai! =========================="
+    log_message "INFO" "Semua tes dalam sesi ini telah selesai."
+    log_message "INFO" "Hasil lengkap dapat ditemukan di: ${session_result_dir}"
+
+    log_message "STEP" "Menampilkan notifikasi selesai..."
+    animate  ~/Documents/alert/alert.gif &
+    local animate_pid=$!
+
+    whiptail --title "Selesai" --msgbox "Semua tes telah selesai.\n\nLog lengkap dan hasil disimpan di:\n${session_result_dir}" 12 70
+
+    kill "$animate_pid" &>/dev/null || true
+
+    log_message "INFO" "Membuka folder hasil di file manager..."
+    if command -v xdg-open &> /dev/null; then
+        xdg-open "$session_result_dir"
+    elif command -v open &> /dev/null; then
+        open "$session_result_dir"
+    else
+        log_message "WARN" "Tidak dapat membuka folder secara otomatis. Buka manual: ${session_result_dir}"
+    fi
+}
+
+main
