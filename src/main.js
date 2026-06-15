@@ -230,6 +230,24 @@ app.innerHTML = `
         <pre class="settings-output" id="settingsOutput"></pre>
       </section>
     </div>
+
+    <div class="modal-backdrop hidden" id="warningsModal">
+      <section class="settings-modal warnings-modal" role="dialog" aria-modal="true" aria-labelledby="warningsTitle">
+        <header>
+          <div>
+            <h2 id="warningsTitle" style="color: var(--yellow);">Mismatched Tools Warning</h2>
+            <p>Some required tools are mismatched or missing.</p>
+          </div>
+          <button class="icon-button" id="warningsCloseBtn" title="Close">×</button>
+        </header>
+        <div class="warnings-content" style="max-height: 300px; overflow-y: auto; margin: 16px 0;">
+          <ul id="warningsList" style="list-style: none; padding: 0; margin: 0; font-family: var(--font-mono); font-size: 13px; color: var(--text-muted); line-height: 1.5; display: flex; flex-direction: column; gap: 8px;"></ul>
+        </div>
+        <div class="settings-actions">
+          <button class="run-button" id="warningsOkBtn">OK</button>
+        </div>
+      </section>
+    </div>
   </div>
 `;
 
@@ -275,6 +293,10 @@ const els = {
   runtimeMetric: document.querySelector("#runtimeMetric"),
   suiteList: document.querySelector("#suiteList"),
   clearSuitesBtn: document.querySelector("#clearSuitesBtn"),
+  warningsModal: document.querySelector("#warningsModal"),
+  warningsCloseBtn: document.querySelector("#warningsCloseBtn"),
+  warningsOkBtn: document.querySelector("#warningsOkBtn"),
+  warningsList: document.querySelector("#warningsList"),
 };
 
 els.retryInput.value = state.retryCount;
@@ -294,6 +316,11 @@ els.settingsBtn.addEventListener("click", openSettings);
 els.settingsCloseBtn.addEventListener("click", closeSettings);
 els.settingsModal.addEventListener("click", (event) => {
   if (event.target === els.settingsModal) closeSettings();
+});
+els.warningsCloseBtn.addEventListener("click", () => els.warningsModal.classList.add("hidden"));
+els.warningsOkBtn.addEventListener("click", () => els.warningsModal.classList.add("hidden"));
+els.warningsModal.addEventListener("click", (event) => {
+  if (event.target === els.warningsModal) els.warningsModal.classList.add("hidden");
 });
 els.defaultRootBtn.addEventListener("click", loadDefaultRoot);
 els.preflightBtn.addEventListener("click", runPreflight);
@@ -1182,6 +1209,8 @@ async function chooseLaundryZip() {
         state.laundryWarnings = Array.isArray(warnings) ? warnings : [];
         if (state.laundryWarnings.length > 0) {
           appendLog(`[runner] Mismatched tools check: Found ${state.laundryWarnings.length} warning(s).`);
+          els.warningsList.innerHTML = state.laundryWarnings.map(w => `<li>${escapeHtml(w)}</li>`).join("");
+          els.warningsModal.classList.remove("hidden");
         }
       } catch (err) {
         appendLog(`[runner] Tool version mismatch check failed: ${err}`);

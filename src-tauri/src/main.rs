@@ -1664,14 +1664,21 @@ fn run_sts(
         return Err(format!("sts-tradefed not found: {}", sts_exe.display()));
     }
 
+    let (sts_plan, shard_arg) = if devices.len() > 1 {
+        ("sts", format!(" --shard-count {}", devices.len()))
+    } else {
+        ("sts-dynamic-incremental", String::new())
+    };
+
     let sts_cmd = format!(
-        "run sts-dynamic-incremental --test-arg com.android.compatibility.common.tradefed.testtype.JarHostTest:set-option:android.security.sts.KernelLtsTest:acknowledge_kernel_update_requirement_warning_failure:true --shard-count {}{}{}",
-        devices.len(),
+        "run {} --test-arg com.android.compatibility.common.tradefed.testtype.JarHostTest:set-option:android.security.sts.KernelLtsTest:acknowledge_kernel_update_requirement_warning_failure:true{}{}{}",
+        sts_plan,
+        shard_arg,
         serial_args(devices),
         retry_args
     );
     let sts_log = log_dir.join(format!("sts_{}_{}devs.log", sanitize_name(model), devices.len()));
-    emit_log(app, format!("[runner] STS: starting dynamic incremental on {}", devices.join(",")));
+    emit_log(app, format!("[runner] STS: starting {} on {}", sts_plan, devices.join(",")));
     let sts_snapshot = ResultSnapshot::capture(&sts_root.join("results"));
     let sts_started = SystemTime::now();
     let outcome = run_suite_process(
