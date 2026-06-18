@@ -1099,6 +1099,7 @@ function toggleAllReadyDevices() {
 
 function shardSelectedDevices(devices, mode) {
   if (mode?.id === "Laundry SMR") return shardLaundrySmrDevices(devices);
+  if (mode?.id === "SMR") return shardSmrDevices(devices);
   const groups = new Map();
   devices.forEach((device) => {
     if (mode?.needs === "user" && device.is_userdebug) return;
@@ -1157,7 +1158,29 @@ function shardLaundrySmrDevices(devices) {
       else if (hasUser) group.kind = "USER";
       else group.kind = "USERDEBUG";
     }
-    return valid;
+  });
+}
+
+function shardSmrDevices(devices) {
+  const groups = new Map();
+  devices.forEach((device) => {
+    const family = fingerprintFamilyKey(device);
+    const model = modelKey(device);
+    const key = `${model}::${family}`;
+    if (!groups.has(key)) groups.set(key, { kind: "", fingerprint: family, model, devices: [] });
+    groups.get(key).devices.push(device);
+  });
+  return [...groups.values()].map((group) => {
+    const hasUser = group.devices.some((device) => !device.is_userdebug);
+    const hasUserdebug = group.devices.some((device) => device.is_userdebug);
+    if (hasUser && hasUserdebug) {
+      group.kind = "USER+USERDEBUG";
+    } else if (hasUser) {
+      group.kind = "USER";
+    } else {
+      group.kind = "USERDEBUG";
+    }
+    return group;
   });
 }
 
