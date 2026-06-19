@@ -73,12 +73,14 @@ detect_linux_package_type() {
 
 install_deb() {
   local package_path="$1"
+  local abs_path
+  abs_path="$(realpath "$package_path")"
   if command -v apt >/dev/null 2>&1; then
-    sudo apt install -y --reinstall "$package_path"
+    sudo apt install -y --reinstall "$abs_path"
   elif command -v apt-get >/dev/null 2>&1; then
-    sudo apt-get install -y --reinstall "$package_path"
+    sudo apt-get install -y --reinstall "$abs_path"
   elif command -v dpkg >/dev/null 2>&1; then
-    sudo dpkg -i "$package_path" || sudo apt-get install -f -y
+    sudo dpkg -i "$abs_path" || sudo apt-get install -f -y
   else
     echo "[build] Cannot install .deb: apt/dpkg not found" >&2
     return 1
@@ -87,16 +89,18 @@ install_deb() {
 
 install_rpm() {
   local package_path="$1"
+  local abs_path
+  abs_path="$(realpath "$package_path")"
   if command -v rpm >/dev/null 2>&1 && rpm -q gba-agentic-runner >/dev/null 2>&1; then
-    sudo rpm -Uvh --replacepkgs "$package_path"
+    sudo rpm -Uvh --replacepkgs "$abs_path"
   elif command -v dnf >/dev/null 2>&1; then
-    sudo dnf install -y "$package_path"
+    sudo dnf install -y "$abs_path"
   elif command -v zypper >/dev/null 2>&1; then
-    sudo zypper --non-interactive install --allow-unsigned-rpm "$package_path"
+    sudo zypper --non-interactive install --allow-unsigned-rpm "$abs_path"
   elif command -v yum >/dev/null 2>&1; then
-    sudo yum install -y "$package_path"
+    sudo yum install -y "$abs_path"
   elif command -v rpm >/dev/null 2>&1; then
-    sudo rpm -Uvh --replacepkgs "$package_path"
+    sudo rpm -Uvh --replacepkgs "$abs_path"
   else
     echo "[build] Cannot install .rpm: dnf/yum/zypper/rpm not found" >&2
     return 1

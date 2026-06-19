@@ -1121,27 +1121,29 @@ function shardLaundrySmrDevices(devices) {
   if (state.selectedLaundryResults && state.selectedLaundryResults.size > 0) {
     const selectedRows = state.laundryResults.filter(row => state.selectedLaundryResults.has(row.id));
     hasCtsOrGts = selectedRows.some(row => {
-      const t = (row.testcase || "").toUpperCase();
+      const t = ((row.testcase || "") + " " + (row.suite || "")).toUpperCase();
       return t.includes("CTS") || t.includes("GTS") || t.includes("COMPATIBILITY") || t.includes("GOOGLE");
     });
     hasSts = selectedRows.some(row => {
-      const t = (row.testcase || "").toUpperCase();
+      const t = ((row.testcase || "") + " " + (row.suite || "")).toUpperCase();
       return t.includes("STS") || t.includes("SECURITY");
     });
   }
 
   devices.forEach((device) => {
-    const family = fingerprintFamilyKey(device);
     const model = modelKey(device);
-    const key = `${model}::${family}`;
-    if (!groups.has(key)) groups.set(key, { kind: "", fingerprint: family, model, devices: [] });
+    const key = model;
+    if (!groups.has(key)) {
+      // ponytail: group by model so user+userdebug of same model run together
+      groups.set(key, { kind: "", fingerprint: fingerprintFamilyKey(device), model, devices: [] });
+    }
     groups.get(key).devices.push(device);
   });
-  
+
   return [...groups.values()].filter((group) => {
     const hasUser = group.devices.some((device) => !device.is_userdebug);
     const hasUserdebug = group.devices.some((device) => device.is_userdebug);
-    
+
     let valid = false;
     if (hasCtsOrGts && hasSts) {
       valid = hasUser && hasUserdebug;
@@ -1150,14 +1152,16 @@ function shardLaundrySmrDevices(devices) {
     } else if (hasSts) {
       valid = hasUserdebug;
     } else {
+      // ponytail: no row type detected — accept any device combo
       valid = hasUser || hasUserdebug;
     }
-    
+
     if (valid) {
       if (hasUser && hasUserdebug) group.kind = "USER+USERDEBUG";
       else if (hasUser) group.kind = "USER";
       else group.kind = "USERDEBUG";
     }
+    return valid;
   });
 }
 

@@ -2882,40 +2882,19 @@ fn validate_laundry_smr_pair(request: &RunSuiteRequest) -> Result<(), String> {
 
     let serials = selected_serials(request);
     let mut models = Vec::new();
-    let mut families = Vec::new();
     for serial in &serials {
         let props = device_props(serial).unwrap_or_default();
         let model = first_non_empty(&[prop(&props, "ro.product.model"), "UNKNOWN_MODEL".to_string()]);
-        let family = fingerprint_family(&prop(&props, "ro.build.fingerprint"), &model);
         if !models.contains(&model) {
             models.push(model);
-        }
-        if !families.contains(&family) {
-            families.push(family);
         }
     }
     if models.len() > 1 {
         return Err(format!("Laundry SMR devices must use the same model: {}", models.join(", ")));
     }
-    if families.len() > 1 {
-        return Err(format!("Laundry SMR devices must use the same fingerprint family: {}", families.join(", ")));
-    }
     Ok(())
 }
 
-fn fingerprint_family(fingerprint: &str, fallback_model: &str) -> String {
-    let product_part = fingerprint.split(':').next().unwrap_or("").trim();
-    let pieces = product_part
-        .split('/')
-        .filter(|part| !part.is_empty())
-        .take(3)
-        .collect::<Vec<_>>();
-    if pieces.len() == 3 {
-        pieces.join("/")
-    } else {
-        fallback_model.to_string()
-    }
-}
 
 fn selected_serials(request: &RunSuiteRequest) -> Vec<String> {
     request
