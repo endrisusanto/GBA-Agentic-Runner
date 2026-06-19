@@ -444,8 +444,8 @@ async function loadDefaultRoot(overwrite = true) {
 async function reconcileAutoRoot() {
   try {
     const root = await invoke("default_auto_root");
-    if (!state.autoRoot || state.autoRoot !== root) {
-      if (state.autoRoot) appendLog(`[settings] AUTO root updated: ${state.autoRoot} -> ${root}`);
+    // ponytail: only initialize if empty to prevent overwriting user's custom saved path
+    if (!state.autoRoot) {
       state.autoRoot = root;
       localStorage.setItem("autoRoot", root);
     }

@@ -153,6 +153,11 @@ struct SuiteOutcome {
 
 #[tauri::command]
 fn default_auto_root() -> Result<String, String> {
+    // ponytail: prefer the local system's AUTO directory if present
+    let preferred = PathBuf::from("/run/media/endri-pro/BINARY_HDD/AUTO");
+    if preferred.is_dir() {
+        return Ok(preferred.display().to_string());
+    }
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     Ok(manifest
         .parent()
