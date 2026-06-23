@@ -581,6 +581,7 @@ function renderTestArea() {
         await chooseLaundryZip();
       }
       renderTestArea();
+      renderFlowMap();
     });
   });
 }

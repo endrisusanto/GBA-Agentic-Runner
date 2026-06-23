@@ -334,7 +334,7 @@ fn check_laundry_mismatches(auto_root: String, zip_path: String) -> Result<Vec<S
             // Try to resolve the suite root
             let suite_root = if suite == "CTS" {
                 if let Some(v) = cts_version_from_result(dir) {
-                    resolve_cts_root(&root, &v).ok()
+                    resolve_lowest_cts_root(&root, &v).ok()
                 } else {
                     None
                 }
@@ -2054,13 +2054,12 @@ fn suite_root_for_copy(root: &Path, suite: &str, devices: &[String]) -> Result<P
     }
 }
 
-fn suite_root_for_laundry_result(root: &Path, suite: &str, devices: &[String], result_dir: &Path) -> Result<PathBuf, String> {
+fn suite_root_for_laundry_result(root: &Path, suite: &str, devices: &[String], _result_dir: &Path) -> Result<PathBuf, String> {
     if suite == "CTS" {
-        if let Some(version) = cts_version_from_result(result_dir) {
-            return resolve_cts_root(root, &version);
-        }
+        // ponytail: use the lowest CTS revision matching the device OS; add per-result selection only if a retry proves incompatible.
+        return suite_root_for_copy(root, suite, devices);
     } else if suite == "GTS" {
-        if let Some(version) = suite_version_from_result(result_dir) {
+        if let Some(version) = suite_version_from_result(_result_dir) {
             return resolve_gts_root(root, &version);
         }
     }
@@ -2069,6 +2068,11 @@ fn suite_root_for_laundry_result(root: &Path, suite: &str, devices: &[String], r
 
 fn resolve_cts_root(root: &Path, version_hint: &str) -> Result<PathBuf, String> {
     resolve_versioned_suite_root(root, "CTS", "android-cts", version_hint)
+}
+
+fn resolve_lowest_cts_root(root: &Path, version_hint: &str) -> Result<PathBuf, String> {
+    let os_version = version_hint.split_once("_r").map_or(version_hint, |(version, _)| version);
+    resolve_cts_root(root, os_version)
 }
 
 fn resolve_gts_root(root: &Path, version_hint: &str) -> Result<PathBuf, String> {
@@ -2142,6 +2146,24 @@ fn suite_version_rank(version: &str) -> (u32, u32, u32) {
     let minor = base_parts.next().and_then(|part| part.parse::<u32>().ok()).unwrap_or(0);
     let rev = revision.parse::<u32>().unwrap_or(0);
     (major, minor, rev)
+}
+
+fn same_suite_os_version(left: &str, right: &str) -> bool {
+    let (left_major, left_minor, _) = suite_version_rank(left);
+    let (right_major, right_minor, _) = suite_version_rank(right);
+    left_major == right_major && left_minor == right_minor
+}
+
+#[cfg(test)]
+mod tests {
+    use super::same_suite_os_version;
+
+    #[test]
+    fn cts_revisions_must_keep_the_same_os_version() {
+        assert!(same_suite_os_version("16_r4", "16_r5"));
+        assert!(same_suite_os_version("16.1_r3", "16.1_r4"));
+        assert!(!same_suite_os_version("16_r5", "16.1_r3"));
+    }
 }
 
 fn tradefed_tool_for_suite(suite_root: &Path, suite: &str) -> Result<PathBuf, String> {
@@ -2279,7 +2301,11 @@ fn verify_laundry_suite_tools(
                             .and_then(|f| f.to_str())
                             .unwrap_or("");
                         let warn_only_mismatch = !local_folder_version.is_empty()
-                            && normalized_version.as_deref() == Some(local_folder_version);
+                            && (normalized_version.as_deref() == Some(local_folder_version)
+                                || (*suite == "CTS"
+                                    && normalized_version.as_deref().is_some_and(|version| {
+                                        same_suite_os_version(local_folder_version, version)
+                                    })));
                         if warn_only_mismatch {
                             emit_log(
                                 app,

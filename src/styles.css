@@ -12,7 +12,7 @@
   --green: #22f08a;
   --red: #ff4d61;
   --yellow: #d8ce69;
-  font-family: Inter, "Segoe UI", Roboto, Arial, sans-serif;
+  font-family: "IBM Plex Mono", "Cascadia Mono", "JetBrains Mono", Consolas, monospace;
   background: var(--bg);
   color: var(--text);
 }
@@ -36,8 +36,8 @@ input {
 
 .shell {
   display: grid;
-  grid-template-columns: 360px minmax(520px, 1fr) minmax(320px, 420px);
-  grid-template-rows: 80px 1fr;
+  grid-template-columns: minmax(360px, 400px) minmax(440px, 1fr) minmax(280px, 360px);
+  grid-template-rows: 64px 1fr;
   width: 100vw;
   height: 100vh;
   background: var(--bg);
@@ -88,7 +88,7 @@ input {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 0 24px;
+  padding: 0 16px;
   border-bottom: 1px solid var(--line-soft);
   background: #0f1010;
 }
@@ -113,8 +113,10 @@ p {
 }
 
 h1 {
-  font-size: 17px;
-  font-weight: 800;
+  font-size: 15px;
+  font-weight: 900;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
 .brand p {
@@ -133,7 +135,7 @@ h2 {
   width: 48px;
   height: 42px;
   border: 1px solid var(--line);
-  border-radius: 4px;
+  border-radius: 2px;
   background: #111313;
   color: var(--muted);
   cursor: pointer;
@@ -182,12 +184,14 @@ h2 {
 .run-button {
   height: 32px;
   border: 1px solid var(--line);
-  border-radius: 5px;
+  border-radius: 2px;
   background: #111212;
   color: var(--text);
   padding: 0 14px;
   font-weight: 700;
   cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
 }
 
 .mini-button {
@@ -529,8 +533,8 @@ h2 {
   flex: 0 0 auto;
   min-width: 0;
   width: auto;
-  min-height: 38px;
-  padding: 8px 14px;
+  min-height: 34px;
+  padding: 7px 12px;
   margin: 0;
 }
 
@@ -543,6 +547,16 @@ h2 {
 .mode-card.selected strong,
 .mode-card.selected {
   color: var(--green);
+}
+
+button:not(:disabled):focus-visible,
+input:focus-visible {
+  outline: 2px solid var(--cyan);
+  outline-offset: 2px;
+}
+
+button:not(:disabled):hover {
+  border-color: #4a5656;
 }
 
 .flow-map {
