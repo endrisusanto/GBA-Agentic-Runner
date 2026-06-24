@@ -1,3 +1,36 @@
 {
-  "devices": {}
+  "devices": {
+    "R32W400GFZD": {
+      "serial": "R32W400GFZD",
+      "test_type": "Laundry SMR",
+      "model": "SM-X610",
+      "pda": "X610XXSDEZF1",
+      "run_id": "Laundry_SMR_1782292095048_1",
+      "started_at": "1782292095"
+    },
+    "R32W400FYYA": {
+      "serial": "R32W400FYYA",
+      "test_type": "Laundry SMR",
+      "model": "SM-X610",
+      "pda": "X610XXSDEZF1",
+      "run_id": "Laundry_SMR_1782292095048_1",
+      "started_at": "1782292095"
+    },
+    "RRCY901P30M": {
+      "serial": "RRCY901P30M",
+      "test_type": "SMR",
+      "model": "SM-S931B",
+      "pda": "S931BXXSACZF3",
+      "run_id": "SMR_1782264545325_1",
+      "started_at": "1782264545"
+    },
+    "R3CX80V3PAT": {
+      "serial": "R3CX80V3PAT",
+      "test_type": "SMR",
+      "model": "SM-S931B",
+      "pda": "S931BXXSACZF3",
+      "run_id": "SMR_1782264545325_1",
+      "started_at": "1782264545"
+    }
+  }
 }

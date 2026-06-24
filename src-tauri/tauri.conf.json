@@ -14,7 +14,7 @@
       {
         "title": "GBA Agentic Runner",
         "width": 1920,
-        "height": 760,
+        "height": 1000,
         "minWidth": 1120,
         "minHeight": 720,
         "resizable": true,
