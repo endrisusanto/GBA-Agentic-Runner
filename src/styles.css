@@ -46,14 +46,16 @@ input {
 .splash {
   position: fixed;
   inset: 0;
-  z-index: 20;
+  z-index: 9999; /* ponytail: high z-index to overlay native/composited scrollbars */
   display: grid;
   gap: 18px;
   place-items: center;
   align-content: center;
   background: #080909;
   pointer-events: none;
+  transform: translate3d(0, 0, 0); /* ponytail: force compositing layer */
 }
+
 
 .splash.fade-out {
   animation: splash-out 1.25s ease forwards;

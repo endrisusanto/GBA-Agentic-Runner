@@ -89,12 +89,13 @@ const app = document.querySelector("#app");
 let confettiInterval = null;
 
 app.innerHTML = `
-  <div class="shell">
-    <div class="splash" id="splash">
-      <img src="${agenticLogo}" alt="GBA Agentic Runner" />
-      <strong>GBA Agentic Runner</strong>
-    </div>
+  <!-- ponytail: splash screen outside shell to avoid grid layout stacking contexts -->
+  <div class="splash" id="splash">
+    <img src="${agenticLogo}" alt="GBA Agentic Runner" />
+    <strong>GBA Agentic Runner</strong>
+  </div>
 
+  <div class="shell">
     <header class="titlebar">
       <div class="brand">
         <img class="brand-mark" src="${agenticLogo}" alt="GBA" />
