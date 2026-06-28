@@ -1,7 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import confetti from "canvas-confetti";
 import "./styles.css";
 import agenticLogo from "./assets/agentic.png";
 
@@ -81,27 +80,22 @@ const state = {
   summaries: new Map(),
   resultDir: "",
   runStartedAt: null,
+  runElapsedSecs: 0,
   runTableTab: "preview",
   laundryWarnings: [],
+  preflightLines: [],
 };
 
 const app = document.querySelector("#app");
-let confettiInterval = null;
 
 app.innerHTML = `
-  <!-- ponytail: splash screen outside shell to avoid grid layout stacking contexts -->
-  <div class="splash" id="splash">
-    <img src="${agenticLogo}" alt="GBA Agentic Runner" />
-    <strong>GBA Agentic Runner</strong>
-  </div>
-
   <div class="shell">
     <header class="titlebar">
       <div class="brand">
         <img class="brand-mark" src="${agenticLogo}" alt="GBA" />
         <div>
           <h1>GBA Agentic Runner</h1>
-          <p>CTS, GTS, and STS automation console</p>
+          <p>Runner</p>
         </div>
       </div>
       <button class="icon-button settings-button" id="settingsBtn" title="Settings" aria-label="Settings">
@@ -130,11 +124,21 @@ app.innerHTML = `
         <button class="run-button" id="runBtn">Run Selected</button>
         <button class="ghost-button" id="cancelBtn" disabled>Cancel</button>
         <button class="ghost-button" id="openResultBtn" disabled>Open Result</button>
+        <button class="ghost-button" id="preflightToolbarBtn">Preflight</button>
         <div class="toolbar-spacer"></div>
+        <span class="toolbar-pill" id="modePill">Laundry SMR</span>
+        <span class="toolbar-pill" id="selectedPill">0 selected</span>
+        <span class="toolbar-pill" id="preflightPill">Preflight -</span>
+        <span class="elapsed-pill" id="elapsedPill">00:00:00</span>
+      </div>
+
+      <section class="selected-strip" id="selectedStrip"></section>
+      <section class="preflight-panel" id="preflightPanel"></section>
+      <section class="run-options">
         <label class="retry">Retry <input id="retryInput" type="number" min="0" max="99" /></label>
         <label class="retry">Timeout <input id="timeoutInput" type="number" min="60" /></label>
         <label class="check"><input id="wifiInput" type="checkbox" /> Wi-Fi</label>
-      </div>
+      </section>
 
       <section class="test-area" id="testArea"></section>
 
@@ -178,7 +182,8 @@ app.innerHTML = `
 
     <aside class="summary-pane">
       <section class="summary">
-        <h2>SUMMARIZE</h2>
+        <h2>RUN</h2>
+        <div class="current-run" id="currentRun"></div>
         <div class="metric-row"><span>Active suites:</span><strong id="activeMetric">0</strong></div>
         <div class="metric-row"><span>Completed:</span><strong id="completedMetric">0</strong></div>
         <div class="metric-row"><span>Passed:</span><strong class="pass" id="passedMetric">0</strong></div>
@@ -236,8 +241,8 @@ app.innerHTML = `
       <section class="settings-modal warnings-modal" role="dialog" aria-modal="true" aria-labelledby="warningsTitle">
         <header>
           <div>
-            <h2 id="warningsTitle" style="color: var(--yellow);">Mismatched Tools Warning</h2>
-            <p>Some required tools are mismatched or missing.</p>
+            <h2 id="warningsTitle">Info</h2>
+            <p id="warningsText">Details</p>
           </div>
           <button class="icon-button" id="warningsCloseBtn" title="Close">×</button>
         </header>
@@ -265,6 +270,13 @@ const els = {
   runBtn: document.querySelector("#runBtn"),
   cancelBtn: document.querySelector("#cancelBtn"),
   openResultBtn: document.querySelector("#openResultBtn"),
+  preflightToolbarBtn: document.querySelector("#preflightToolbarBtn"),
+  preflightPanel: document.querySelector("#preflightPanel"),
+  selectedStrip: document.querySelector("#selectedStrip"),
+  modePill: document.querySelector("#modePill"),
+  selectedPill: document.querySelector("#selectedPill"),
+  preflightPill: document.querySelector("#preflightPill"),
+  elapsedPill: document.querySelector("#elapsedPill"),
   resultPill: document.querySelector("#resultPill"),
   unselectBtn: document.querySelector("#unselectBtn"),
   resetBusyBtn: document.querySelector("#resetBusyBtn"),
@@ -292,12 +304,15 @@ const els = {
   passedMetric: document.querySelector("#passedMetric"),
   failedMetric: document.querySelector("#failedMetric"),
   runtimeMetric: document.querySelector("#runtimeMetric"),
+  currentRun: document.querySelector("#currentRun"),
   suiteList: document.querySelector("#suiteList"),
   clearSuitesBtn: document.querySelector("#clearSuitesBtn"),
   warningsModal: document.querySelector("#warningsModal"),
   warningsCloseBtn: document.querySelector("#warningsCloseBtn"),
   warningsOkBtn: document.querySelector("#warningsOkBtn"),
   warningsList: document.querySelector("#warningsList"),
+  warningsTitle: document.querySelector("#warningsTitle"),
+  warningsText: document.querySelector("#warningsText"),
 };
 
 els.retryInput.value = state.retryCount;
@@ -330,6 +345,7 @@ els.browseBtn.addEventListener("click", browseRoot);
 els.runBtn.addEventListener("click", runSelected);
 els.cancelBtn.addEventListener("click", cancelRun);
 els.openResultBtn.addEventListener("click", openResult);
+els.preflightToolbarBtn.addEventListener("click", () => runPreflight(false));
 els.resultPill.addEventListener("click", openResult);
 els.flowResizer.addEventListener("pointerdown", startFlowResize);
   const flowMapHeader = document.getElementById("flowMapHeader");
@@ -404,30 +420,22 @@ listen("gba-run-finished", (event) => {
   els.statusLine.textContent = payload.exit_code === 0 ? "Completed" : "Finished with issue";
   appendRunSummaryToLog(payload.run_id || "legacy");
   appendRunnerLogForRun(payload.run_id || "legacy", `[runner] Finished exit=${payload.exit_code} result=${state.resultDir || "N/A"}`);
-  if (Number(payload.exit_code) === 0) startConfettiLoop();
+  if (Number(payload.exit_code) !== 0) showInfoModal("Run Finished With Issue", `Exit code ${payload.exit_code}`, [`Result: ${state.resultDir || "N/A"}`], "error");
   renderFlowMap();
   renderMetrics();
 });
 
 listen("gba-tool-error", (event) => {
-  const errorMsg = String(event.payload || "");
-  els.warningsList.innerHTML = `<li>${escapeHtml(errorMsg)}</li>`;
-  els.warningsModal.classList.remove("hidden");
+  showInfoModal("Tool Error", "Runner reported an error.", [String(event.payload || "")], "error");
 });
 
 init();
 
 async function init() {
   render();
-  try { confetti({ particleCount: 0 }); } catch (_) {}
   await reconcileAutoRoot();
   await refreshDevices();
-
-  // Fade out splash screen
-  const splash = document.getElementById("splash");
-  if (splash) {
-    splash.classList.add("fade-out");
-  }
+  await runPreflight(false);
 }
 
 async function loadDefaultRoot(overwrite = true) {
@@ -466,6 +474,7 @@ async function refreshDevices() {
     appendLog(`[adb] Found ${state.devices.length} device(s).`);
   } catch (error) {
     appendLog(`[adb] Refresh failed: ${error}`);
+    showInfoModal("ADB Refresh Failed", "Device scan failed.", [String(error)], "error");
     state.devices = [];
   }
   renderDevices();
@@ -487,10 +496,12 @@ function applyLocalBusyOverlay(devices) {
 function render() {
   renderDevices();
   renderTestArea();
+  renderSelectedStrip();
   renderFlowMap();
   renderLog();
   renderSuiteStatus();
   renderMetrics();
+  renderPreflight();
 }
 
 function renderDevices() {
@@ -499,6 +510,7 @@ function renderDevices() {
 
   if (!state.devices.length) {
     els.deviceList.innerHTML = `<div class="empty">No ADB devices detected.</div>`;
+    renderSelectedStrip();
     return;
   }
 
@@ -563,6 +575,7 @@ function renderDevices() {
       await openScrcpy(button.dataset.scrcpy);
     });
   });
+  renderSelectedStrip();
 }
 
 function renderTestArea() {
@@ -585,6 +598,50 @@ function renderTestArea() {
       renderFlowMap();
     });
   });
+}
+
+function renderPreflight() {
+  if (!state.preflightLines.length) {
+    els.preflightPanel.innerHTML = `<div class="preflight-empty">Preflight has not run.</div>`;
+    els.preflightPill.textContent = "Preflight -";
+    return;
+  }
+  const groups = preflightGroups();
+  const missing = groups.reduce((sum, group) => sum + group.bad.length, 0);
+  els.preflightPill.textContent = missing ? `Preflight ${missing}` : "Preflight OK";
+  els.preflightPill.className = `toolbar-pill ${missing ? "bad" : "ok"}`;
+  els.preflightPanel.innerHTML = `
+    <div class="preflight-head">
+      <strong class="${missing ? "fail" : "pass"}">${missing ? `${missing} issue(s)` : "Ready"}</strong>
+      <span>${escapeHtml(state.autoRoot || "-")}</span>
+    </div>
+    <div class="preflight-list">
+      ${groups.map((group) => `
+        <button class="${group.bad.length ? "bad" : "ok"}" title="${escapeHtml([...group.bad, ...group.ok].join("\n"))}">
+          <b>${escapeHtml(group.name)}</b>
+          <span>${group.bad.length ? `${group.bad.length} issue` : `${group.ok.length} OK`}</span>
+        </button>
+      `).join("")}
+    </div>
+  `;
+}
+
+function renderSelectedStrip() {
+  const selectedDevices = state.devices.filter((device) => state.selected.has(device.serial));
+  const models = [...new Set(selectedDevices.map(modelKey))];
+  const kinds = [
+    selectedDevices.some((device) => !device.is_userdebug) ? "USER" : "",
+    selectedDevices.some((device) => device.is_userdebug) ? "USERDEBUG" : "",
+  ].filter(Boolean).join("+") || "-";
+  const selectedText = `${selectedDevices.length} selected`;
+  els.modePill.textContent = state.selectedMode;
+  els.selectedPill.textContent = selectedText;
+  els.selectedStrip.innerHTML = `
+    <span><b>Selected</b> ${selectedText}</span>
+    <span><b>Model</b> ${escapeHtml(models.join(", ") || "-")}</span>
+    <span><b>Type</b> ${escapeHtml(kinds)}</span>
+    <span><b>Zip</b> ${escapeHtml(fileName(state.laundryZipPath))}</span>
+  `;
 }
 
 function renderLog() {
@@ -748,8 +805,9 @@ function renderFlowMap() {
   if (!state.runTableTab) {
     state.runTableTab = "preview";
   }
-
-  const warningCount = state.laundryWarnings ? state.laundryWarnings.length : 0;
+  if (!["preview", "running", "completed"].includes(state.runTableTab)) {
+    state.runTableTab = "preview";
+  }
 
   const tabsHtml = `
     <div class="run-table-tabs">
@@ -761,9 +819,6 @@ function renderFlowMap() {
       </button>
       <button class="run-tab-btn ${state.runTableTab === 'completed' ? 'active' : ''}" data-tab="completed">
         Completed (${completedCount})
-      </button>
-      <button class="run-tab-btn ${state.runTableTab === 'warning' ? 'active' : ''}" data-tab="warning">
-        Warning (${warningCount})
       </button>
     </div>
   `;
@@ -792,24 +847,6 @@ function renderFlowMap() {
     } else {
       contentHtml = `<div class="empty">No completed flows.</div>`;
     }
-  } else if (state.runTableTab === "warning") {
-    if (warningCount > 0) {
-      contentHtml = `
-        <div class="warning-container">
-          ${state.laundryWarnings.map((warn) => `
-            <div class="warning-card">
-              <div class="warning-title">
-                <span class="warning-icon-alert">⚠️</span>
-                <strong>Mismatched Tool Version</strong>
-              </div>
-              <pre class="warning-desc">${escapeHtml(warn)}</pre>
-            </div>
-          `).join("")}
-        </div>
-      `;
-    } else {
-      contentHtml = `<div class="empty no-warnings">No tool version mismatches detected. Local tools match the laundry zip versions.</div>`;
-    }
   }
 
   els.flowMap.innerHTML = `
@@ -833,6 +870,7 @@ function renderFlowMap() {
     input.addEventListener("change", () => {
       if (input.checked) state.selectedLaundryResults.add(input.dataset.id);
       else state.selectedLaundryResults.delete(input.dataset.id);
+      selectLaundryModelFromResults();
       renderFlowMap();
     });
   });
@@ -1058,7 +1096,25 @@ function renderMetrics() {
   els.completedMetric.textContent = String(completed);
   els.passedMetric.textContent = String(passed);
   els.failedMetric.textContent = String(failed);
-  els.runtimeMetric.textContent = state.runStartedAt ? formatDuration(Math.floor((Date.now() - state.runStartedAt) / 1000)) : "00:00:00";
+  if (state.running && state.runStartedAt) state.runElapsedSecs = Math.floor((Date.now() - state.runStartedAt) / 1000);
+  const elapsed = formatDuration(state.runElapsedSecs || 0);
+  els.runtimeMetric.textContent = elapsed;
+  els.elapsedPill.textContent = elapsed;
+  if (state.running) els.statusLine.textContent = `Running ${elapsed}`;
+  renderCurrentRun(statuses, elapsed);
+}
+
+function renderCurrentRun(statuses, elapsed) {
+  const active = statuses.find((status) => !["Test Done", "Cancelled", "Failed", "Timeout", "Completed"].includes(status.status)) || statuses[statuses.length - 1];
+  const flow = active ? state.flows.get(active.run_id || "legacy") : null;
+  els.currentRun.innerHTML = `
+    <div><span>Mode</span><b>${escapeHtml(flow?.mode || state.selectedMode || "-")}</b></div>
+    <div><span>Model</span><b>${escapeHtml(getDeviceModelsForFlow(flow) || "-")}</b></div>
+    <div><span>Devices</span><b>${escapeHtml(flow?.devices || "-")}</b></div>
+    <div><span>Suite</span><b>${escapeHtml(active?.suite || "-")}</b></div>
+    <div><span>Status</span><b class="status-${statusClass(active?.status)}">${escapeHtml(active?.status || "Standby")}</b></div>
+    <div><span>Elapsed</span><b>${escapeHtml(elapsed)}</b></div>
+  `;
 }
 
 function ensureFlow(runId, testType, devices) {
@@ -1093,9 +1149,16 @@ function getDeviceModelsForFlow(flow) {
 }
 
 function toggleAllReadyDevices() {
-  const ready = state.devices.filter((device) => device.state === "device" && !device.busy).map((device) => device.serial);
-  if (ready.length && state.selected.size === ready.length) state.selected.clear();
-  else state.selected = new Set(ready);
+  const readyDevices = state.devices.filter((device) => device.state === "device" && !device.busy);
+  const selectedDevices = readyDevices.filter((device) => state.selected.has(device.serial));
+  if (readyDevices.length && state.selected.size === readyDevices.length) {
+    state.selected.clear();
+  } else if (selectedDevices.length) {
+    selectReadyModel(modelKey(selectedDevices[0]));
+  } else {
+    const hinted = selectLaundryModelFromResults();
+    if (!hinted) state.selected = new Set(readyDevices.map((device) => device.serial));
+  }
   render();
 }
 
@@ -1236,15 +1299,16 @@ async function chooseLaundryZip() {
       state.laundryResults = (Array.isArray(rows) ? rows : []).filter((row) => !isCtsVerifierRow(row));
       state.selectedLaundryResults = new Set(state.laundryResults.map((row) => row.id));
       appendLog(`[runner] Laundry zip scanned: ${state.laundryResults.length} result(s).`);
+      selectLaundryModelFromResults();
       
       try {
         const autoRoot = state.autoRoot || await invoke("default_auto_root");
         const warnings = await invoke("check_laundry_mismatches", { autoRoot, zipPath: path });
         state.laundryWarnings = Array.isArray(warnings) ? warnings : [];
-        if (state.laundryWarnings.length > 0) {
+    if (state.laundryWarnings.length > 0) {
           appendLog(`[runner] Mismatched tools check: Found ${state.laundryWarnings.length} warning(s).`);
-          els.warningsList.innerHTML = state.laundryWarnings.map(w => `<li>${escapeHtml(w)}</li>`).join("");
-          els.warningsModal.classList.remove("hidden");
+          renderPreflight();
+          showInfoModal("Mismatched Tools Warning", "Some required tools are mismatched or missing.", state.laundryWarnings, "warning");
         }
       } catch (err) {
         appendLog(`[runner] Tool version mismatch check failed: ${err}`);
@@ -1254,6 +1318,7 @@ async function chooseLaundryZip() {
     } catch (error) {
       appendLog(`[runner] Laundry zip scan failed: ${error}`);
       els.statusLine.textContent = "Laundry zip scan failed";
+      showInfoModal("Laundry Zip Scan Failed", "Cannot read selected laundry zip.", [String(error)], "error");
       renderFlowMap();
     }
   }
@@ -1264,15 +1329,6 @@ async function runSelected() {
   const mode = TEST_MODES.find((item) => item.id === state.selectedMode);
   const runMode = state.selectedMode;
   const runFlow = currentModeFlow();
-  const selectedDevices = state.devices.filter((device) => state.selected.has(device.serial));
-  const userDevices = selectedDevices.filter((device) => !device.is_userdebug).map((device) => device.serial);
-  const userdebugDevices = selectedDevices.filter((device) => device.is_userdebug).map((device) => device.serial);
-  const validation = validateRun(mode, userDevices, userdebugDevices);
-  if (validation) {
-    appendLog(`[runner] ${validation}`);
-    els.statusLine.textContent = validation;
-    return;
-  }
   if (isLaundryMode(runMode) && !state.laundryZipPath) {
     await chooseLaundryZip();
     if (state.laundryZipPath) {
@@ -1283,19 +1339,38 @@ async function runSelected() {
     if (!state.laundryZipPath) {
       appendLog("[runner] Laundry flow needs zip file.");
       els.statusLine.textContent = "Laundry zip required";
+      showInfoModal("Laundry Zip Required", "Pick a laundry result zip before running.", ["No zip selected."], "error");
       return;
     }
+  }
+  let selectedDevices = state.devices.filter((device) => state.selected.has(device.serial));
+  let userDevices = selectedDevices.filter((device) => !device.is_userdebug).map((device) => device.serial);
+  let userdebugDevices = selectedDevices.filter((device) => device.is_userdebug).map((device) => device.serial);
+  const validation = validateRun(mode, userDevices, userdebugDevices);
+  if (validation) {
+    appendLog(`[runner] ${validation}`);
+    els.statusLine.textContent = validation;
+    showInfoModal("Run Blocked", "Fix this before running.", [validation], "error");
+    return;
   }
   if (isLaundryMode(runMode) && state.laundryResults.length && state.selectedLaundryResults.size === 0) {
     appendLog("[runner] Select at least one laundry result row.");
     els.statusLine.textContent = "Laundry result selection required";
+    showInfoModal("No Laundry Rows Selected", "Select at least one row from the run table.", ["All rows are currently unchecked."], "error");
     return;
   }
 
   const autoRoot = state.autoRoot || await invoke("default_auto_root");
+  const preflight = await runPreflight(false);
+  const preflightIssues = preflight.filter((line) => !isPreflightOk(line));
+  if (preflightIssues.length) {
+    showInfoModal("Preflight Failed", "Required commands or folders are missing.", preflightIssues, "error");
+    return;
+  }
   const groups = shardSelectedDevices(selectedDevices, mode);
   if (!groups.length) {
     appendLog("[runner] No valid device group for selected mode.");
+    showInfoModal("No Runnable Device Group", "Selected devices do not match this mode.", ["Use Select to pick a same-model ready group."], "error");
     return;
   }
   const runnableDevices = groups.flatMap((group) => group.devices);
@@ -1305,6 +1380,8 @@ async function runSelected() {
   state.running = true;
   state.resultDir = "";
   state.runStartedAt = Date.now();
+  state.runElapsedSecs = 0;
+  state.runTableTab = "running";
   markLocalBusy(runnableDevices, runMode);
   state.selected.clear();
   els.cancelBtn.disabled = false;
@@ -1359,10 +1436,7 @@ async function runSelected() {
       clearLocalBusy(groupSerials);
       const errorMsg = String(error);
       appendLog(`[runner] Run failed for ${groupSerials.join(",")}: ${errorMsg}`);
-      if (errorMsg.includes("not found")) {
-        els.warningsList.innerHTML = `<li>${escapeHtml(errorMsg)}</li>`;
-        els.warningsModal.classList.remove("hidden");
-      }
+      showInfoModal("Run Failed", `Devices: ${groupSerials.join(",")}`, [errorMsg], "error");
     }
   }
 
@@ -1440,6 +1514,7 @@ async function cancelRun() {
     await refreshDevices();
   } catch (error) {
     appendLog(`[runner] Cancel failed: ${error}`);
+    showInfoModal("Cancel Failed", "Runner could not cancel the active process.", [String(error)], "error");
     els.cancelBtn.disabled = false;
   }
 }
@@ -1455,6 +1530,7 @@ async function resetBusyState() {
     await refreshDevices();
   } catch (error) {
     appendLog(`[runner] Reset busy state failed: ${error}`);
+    showInfoModal("Reset Busy Failed", "Cannot clear busy state.", [String(error)], "error");
   }
 }
 
@@ -1464,6 +1540,7 @@ async function openResult() {
     await invoke("open_result", { path: state.resultDir });
   } catch (error) {
     appendLog(`[runner] Open result failed: ${error}`);
+    showInfoModal("Open Result Failed", "Cannot open result folder.", [String(error)], "error");
   }
 }
 
@@ -1477,6 +1554,7 @@ async function toggleLamp(serial) {
     renderDevices();
   } catch (error) {
     appendLog(`[runner] Lamp failed for ${serial}: ${error}`);
+    showInfoModal("Lamp Failed", `Device: ${serial}`, [String(error)], "error");
   }
 }
 
@@ -1487,6 +1565,7 @@ async function openScrcpy(serial) {
     await invoke("open_scrcpy", { serial });
   } catch (error) {
     appendLog(`[runner] scrcpy failed for ${serial}: ${error}`);
+    showInfoModal("Scrcpy Failed", `Device: ${serial}`, [String(error)], "error");
   }
 }
 
@@ -1509,14 +1588,21 @@ async function browseRoot() {
   if (path) els.autoRootInput.value = path;
 }
 
-async function runPreflight() {
-  saveSettings(false);
-  els.settingsOutput.textContent = "Checking...\n";
+async function runPreflight(updateSettings = true) {
+  if (updateSettings) saveSettings(false);
+  if (els.settingsOutput) els.settingsOutput.textContent = "Checking...\n";
   try {
     const lines = await invoke("preflight", { autoRoot: state.autoRoot || null });
-    els.settingsOutput.textContent = lines.join("\n");
+    state.preflightLines = Array.isArray(lines) ? lines : [];
+    if (els.settingsOutput) els.settingsOutput.textContent = state.preflightLines.join("\n");
+    renderPreflight();
+    return state.preflightLines;
   } catch (error) {
-    els.settingsOutput.textContent = String(error);
+    state.preflightLines = [String(error)];
+    if (els.settingsOutput) els.settingsOutput.textContent = String(error);
+    renderPreflight();
+    showInfoModal("Preflight Failed", "Cannot run preflight.", [String(error)], "error");
+    return state.preflightLines;
   }
 }
 
@@ -1554,6 +1640,41 @@ function validateRun(mode, userDevices, userdebugDevices) {
   if (mode.needs === "both" && userDevices.length === 0 && userdebugDevices.length === 0) return `${mode.name} needs at least one runnable device.`;
   if (!state.autoRoot) return "AUTO root is empty. Open settings and save root.";
   return "";
+}
+
+function selectLaundryModelFromResults() {
+  if (!isLaundryMode(state.selectedMode) || !state.devices.length) return false;
+  const readyDevices = state.devices.filter((device) => device.state === "device" && !device.busy);
+  const selectedRows = state.laundryResults.filter((row) => !state.selectedLaundryResults.size || state.selectedLaundryResults.has(row.id));
+  const hint = `${state.laundryZipPath} ${selectedRows.map((row) => `${row.id} ${row.testcase} ${row.result_dir}`).join(" ")}`.toUpperCase();
+  const hintedModel = readyDevices.map(modelKey).find((model) => model !== "UNKNOWN_MODEL" && hint.includes(model));
+  if (hintedModel) return selectReadyModel(hintedModel);
+
+  const needs = laundryNeeds(selectedRows);
+  const fallback = readyDevices.find((device) => {
+    const sameModel = readyDevices.filter((item) => modelKey(item) === modelKey(device));
+    if (needs.user && !sameModel.some((item) => !item.is_userdebug)) return false;
+    if (needs.userdebug && !sameModel.some((item) => item.is_userdebug)) return false;
+    return true;
+  });
+  return fallback ? selectReadyModel(modelKey(fallback)) : false;
+}
+
+function selectReadyModel(model) {
+  const serials = state.devices
+    .filter((device) => device.state === "device" && !device.busy && modelKey(device) === model)
+    .map((device) => device.serial);
+  if (!serials.length) return false;
+  state.selected = new Set(serials);
+  appendLog(`[runner] Auto-selected ${serials.length} ${model} device(s).`);
+  return true;
+}
+
+function laundryNeeds(rows) {
+  const text = rows.map((row) => `${row.testcase || ""} ${row.suite || ""}`).join(" ").toUpperCase();
+  const user = text.includes("CTS") || text.includes("GTS") || text.includes("COMPATIBILITY") || text.includes("GOOGLE");
+  const userdebug = text.includes("STS") || text.includes("SECURITY");
+  return { user, userdebug };
 }
 
 function validateLaundrySmrSelection() {
@@ -1657,12 +1778,14 @@ function clearInactiveTableCards() {
   state.laundryResults = [];
   state.selectedLaundryResults = new Set();
   state.laundryZipPath = "";
+  state.laundryWarnings = [];
   for (const [key, row] of [...state.lockedLaundryResults.entries()]) {
     if (!state.activeRuns.has(row.runId)) {
       state.lockedLaundryResults.delete(key);
     }
   }
   appendLog("[runner] Cleared inactive table cards.");
+  renderPreflight();
   renderFlowMap();
 }
 
@@ -1725,25 +1848,6 @@ function appendRunSummaryToLog(runId) {
   appendRunnerLogForRun(runId, `[runner] Flow summary: suites=${summaries.length} total=${total} pass=${passed} fail=${failed}`);
 }
 
-function startConfettiLoop() {
-  if (confettiInterval) clearInterval(confettiInterval);
-  const defaults = { startVelocity: 30, spread: 360, ticks: 60, zIndex: 9999 };
-  const burst = () => confetti({
-    ...defaults,
-    particleCount: 40,
-    origin: { x: Math.random(), y: Math.max(0, Math.random() - 0.2) },
-  });
-  burst();
-  confettiInterval = setInterval(burst, 350);
-  setTimeout(() => window.addEventListener("mousedown", stopConfettiLoop, { once: true }), 500);
-}
-
-function stopConfettiLoop() {
-  if (confettiInterval) clearInterval(confettiInterval);
-  confettiInterval = null;
-  try { confetti.reset(); } catch (_) {}
-}
-
 function logKind(text) {
   const match = text.match(/^\[([^\]]+)\]/);
   const prefix = match ? match[1].toLowerCase() : "";
@@ -1766,6 +1870,42 @@ function formatDuration(total) {
   const m = Math.floor((total % 3600) / 60).toString().padStart(2, "0");
   const s = Math.floor(total % 60).toString().padStart(2, "0");
   return `${h}:${m}:${s}`;
+}
+
+function showInfoModal(title, message, lines = [], tone = "info") {
+  els.warningsModal.dataset.tone = tone;
+  els.warningsTitle.textContent = title;
+  els.warningsText.textContent = message;
+  els.warningsList.innerHTML = lines.map((line) => `<li>${escapeHtml(line)}</li>`).join("");
+  els.warningsModal.classList.remove("hidden");
+}
+
+function preflightGroups() {
+  const groups = [
+    { name: "Commands", ok: [], bad: [] },
+    { name: "Suites", ok: [], bad: [] },
+    { name: "Tools", ok: [], bad: [] },
+    { name: "Results", ok: [], bad: [] },
+    { name: "Warnings", ok: [], bad: [] },
+  ];
+  const bucket = (line) => {
+    if (/command:/.test(line)) return groups[0];
+    if (/Results/.test(line)) return groups[3];
+    if (/tools\//.test(line)) return groups[2];
+    if (/CTS|GTS|STS/.test(line)) return groups[1];
+    return groups[1];
+  };
+  state.preflightLines.forEach((line) => {
+    if (/^Root:/.test(line)) return;
+    const group = bucket(line);
+    (isPreflightOk(line) ? group.ok : group.bad).push(line);
+  });
+  state.laundryWarnings.forEach((line) => groups[4].bad.push(line));
+  return groups.filter((group) => group.ok.length || group.bad.length || group.name === "Warnings");
+}
+
+function isPreflightOk(line) {
+  return /^Root:|^OK /.test(String(line || ""));
 }
 
 function normalizeDialogPath(selected) {

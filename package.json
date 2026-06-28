@@ -1,6 +1,6 @@
 {
   "name": "gba-agentic-runner",
-  "version": "0.0.30",
+  "version": "0.0.31",
   "private": true,
   "type": "module",
   "scripts": {
@@ -17,8 +17,7 @@
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.1",
-    "@tauri-apps/plugin-dialog": "^2.7.1",
-    "canvas-confetti": "^1.9.4"
+    "@tauri-apps/plugin-dialog": "^2.7.1"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.11.3",
