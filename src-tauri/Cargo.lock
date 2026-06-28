@@ -987,7 +987,7 @@ dependencies = [
 
 [[package]]
 name = "gba-agentic-runner"
-version = "0.0.30"
+version = "0.0.31"
 dependencies = [
  "serde",
  "serde_json",

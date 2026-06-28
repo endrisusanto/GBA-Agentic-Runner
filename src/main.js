@@ -657,9 +657,10 @@ function renderLogTabs() {
     createBootLogFlow();
   }
   els.logFlowTabs.innerHTML = [...state.logFlows.values()].map((flow) => `
-    <button class="log-tab ${flow.id === state.activeLogFlow ? "active" : ""}" data-flow="${escapeHtml(flow.id)}" title="${escapeHtml(flow.title)}">
-      ${escapeHtml(flow.title)}
-    </button>
+    <span class="log-tab-wrap ${flow.id === state.activeLogFlow ? "active" : ""}">
+      <button class="log-tab" data-flow="${escapeHtml(flow.id)}" title="${escapeHtml(flow.title)}">${escapeHtml(flow.title)}</button>
+      <button class="log-tab-close" data-close-log="${escapeHtml(flow.id)}" ${flow.id === "boot" || state.activeRuns.has(flow.id) ? "disabled" : ""} title="Close">×</button>
+    </span>
   `).join("");
   els.logFlowTabs.querySelectorAll(".log-tab").forEach((button) => {
     button.addEventListener("click", () => {
@@ -667,6 +668,12 @@ function renderLogTabs() {
       const flow = state.logFlows.get(state.activeLogFlow);
       if (flow && !flow.tabs.has(state.activeLogSubtab)) state.activeLogSubtab = "Runner";
       renderLog();
+    });
+  });
+  els.logFlowTabs.querySelectorAll("[data-close-log]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.stopPropagation();
+      closeLogFlow(button.dataset.closeLog);
     });
   });
 
@@ -1056,6 +1063,7 @@ function renderSuiteStatus() {
         </div>
       `;
     }).join("");
+    const activeRun = state.activeRuns.has(runId);
     return `
       <div class="flow-card">
         <header>
@@ -1070,11 +1078,16 @@ function renderSuiteStatus() {
               <span class="flow-suite-count" style="color: ${pct === 1 ? 'var(--green)' : 'var(--cyan)'}">${completedSuites}/${sortedStatuses.length} suite (${testedTestcases}/${totalTestcases} testcases)</span>
             </div>
           </div>
+          <button class="flow-close" data-close-suite="${escapeHtml(runId)}" ${activeRun ? "disabled" : ""} title="${activeRun ? "Run still active" : "Close"}">×</button>
         </header>
         <div class="flow-suite-list">${rows}</div>
       </div>
     `;
   }).join("");
+
+  els.suiteList.querySelectorAll("[data-close-suite]").forEach((button) => {
+    button.addEventListener("click", () => closeSuiteRun(button.dataset.closeSuite));
+  });
 }
 
 function compareSuiteStatuses(a, b) {
@@ -1767,6 +1780,16 @@ function clearInactiveLogTabs() {
   }
 }
 
+function closeLogFlow(flowId) {
+  if (!flowId || flowId === "boot" || state.activeRuns.has(flowId)) return;
+  state.logFlows.delete(flowId);
+  if (state.activeLogFlow === flowId) {
+    state.activeLogFlow = [...state.logFlows.keys()][0] || "";
+    state.activeLogSubtab = "Runner";
+  }
+  renderLog();
+}
+
 function clearLogView() {
   const flow = state.logFlows.get(state.activeLogFlow);
   const tab = flow?.tabs?.get(state.activeLogSubtab);
@@ -1814,6 +1837,19 @@ function clearInactiveSuites() {
   }
 
   appendLog("[runner] Cleared inactive suite cards.");
+  renderSuiteStatus();
+  renderMetrics();
+}
+
+function closeSuiteRun(runId) {
+  if (!runId || state.activeRuns.has(runId)) return;
+  for (const [key, status] of [...state.suiteStatuses.entries()]) {
+    if ((status.run_id || "legacy") === runId) state.suiteStatuses.delete(key);
+  }
+  for (const key of [...state.summaries.keys()]) {
+    if (key.split(":")[0] === runId) state.summaries.delete(key);
+  }
+  state.flows.delete(runId);
   renderSuiteStatus();
   renderMetrics();
 }
