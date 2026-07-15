@@ -14,6 +14,12 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use tempfile::TempDir;
 use walkdir::WalkDir;
 use zip::ZipArchive;
+use axum::{
+    extract::{State as AxumState, Json, Query},
+    routing::{get, post},
+    Router,
+};
+use tokio::net::TcpListener;
 
 const DEVICE_RECONNECT_TIMEOUT_SECS: u64 = 300;
 
@@ -57,6 +63,51 @@ struct RunSuiteRequest {
     timeout_secs: u64,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct ApiRunRequest {
+    #[serde(flatten)]
+    suite_request: RunSuiteRequest,
+    webhook_url: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ApiRunResponse {
+    status: String,
+    run_id: String,
+}
+
+#[derive(Clone)]
+struct AppState {
+    app_handle: AppHandle,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ApiPreflightRequest {
+    auto_root: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ApiResetBusyStateRequest {
+    auto_root: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ApiSetDeviceLampRequest {
+    serial: String,
+    brighten: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ApiAnalyzeLaundryZipRequest {
+    zip_path: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ApiCheckLaundryMismatchesRequest {
+    auto_root: String,
+    zip_path: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 struct SuiteStatus {
     run_id: String,
@@ -87,6 +138,8 @@ struct RunFinished {
     test_type: String,
     exit_code: i32,
     result_dir: String,
+    summary: Option<SuiteSummary>,
+    zip_file: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -143,6 +196,7 @@ struct ActiveRun {
     pids: Vec<u32>,
     root: Option<PathBuf>,
     busy_serials: Vec<String>,
+    log_file: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -332,15 +386,13 @@ fn check_laundry_mismatches(auto_root: String, zip_path: String) -> Result<Vec<S
             };
 
             // Try to resolve the suite root
-            let suite_root = if suite == "CTS" {
-                if let Some(v) = cts_version_from_result(dir) {
-                    resolve_lowest_cts_root(&root, &v).ok()
-                } else {
-                    None
-                }
-            } else if suite == "GTS" {
+            let suite_root = if suite == "CTS" || suite == "GTS" {
                 if let Some(v) = suite_version_from_result(dir) {
-                    resolve_gts_root(&root, &v).ok()
+                    if suite == "CTS" {
+                        resolve_cts_root(&root, &v).ok()
+                    } else {
+                        resolve_gts_root(&root, &v).ok()
+                    }
                 } else {
                     None
                 }
@@ -456,11 +508,386 @@ fn run_suite(
                 test_type: request.test_type.clone(),
                 exit_code,
                 result_dir,
+                summary: None,
+                zip_file: None,
             },
         );
     });
 
     Ok(())
+}
+
+async fn start_api_server(app_handle: AppHandle) {
+    let state = AppState { app_handle };
+    
+    let app = Router::new()
+        .route("/api/run-suite", post(api_run_suite))
+        .route("/api/devices", get(api_list_devices))
+        .route("/api/preflight", post(api_preflight))
+        .route("/api/cancel-run", post(api_cancel_run))
+        .route("/api/reset-busy-state", post(api_reset_busy_state))
+        .route("/api/set-device-lamp", post(api_set_device_lamp))
+        .route("/api/analyze-laundry-zip", post(api_analyze_laundry_zip))
+        .route("/api/check-laundry-mismatches", post(api_check_laundry_mismatches))
+        .route("/api/logs", get(api_get_logs))
+        .route("/api/run-logs", get(api_get_run_logs))
+        .route("/api/status", get(api_get_status))
+        .route("/api/download", get(api_download_file))
+        .route("/api/screenshot", get(api_screenshot))
+        .with_state(state);
+        
+    if let Ok(listener) = TcpListener::bind("0.0.0.0:3030").await {
+        println!("Local API server listening on 0.0.0.0:3030");
+        let _ = axum::serve(listener, app).await;
+    }
+}
+
+async fn api_list_devices() -> axum::response::Json<Vec<DeviceInfo>> {
+    match list_devices() {
+        Ok(devices) => axum::response::Json(devices),
+        Err(_) => axum::response::Json(vec![]),
+    }
+}
+
+async fn api_run_suite(
+    AxumState(state): AxumState<AppState>,
+    Json(payload): Json<ApiRunRequest>,
+) -> axum::response::Json<serde_json::Value> {
+    let app = state.app_handle.clone();
+    let run_state_managed = app.state::<RunState>();
+    
+    let request = payload.suite_request;
+    
+    let root_res = resolve_auto_root(Some(request.auto_root.clone()));
+    if root_res.is_err() {
+        return axum::response::Json(serde_json::json!({ "error": "Invalid auto_root" }));
+    }
+    let root = root_res.unwrap();
+    
+    if let Err(e) = validate_request(&request) {
+        return axum::response::Json(serde_json::json!({ "error": e }));
+    }
+    
+    let run_id = request
+        .run_id
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| format!("{}_{}", sanitize_name(&request.test_type), timestamp_compact()));
+        
+    {
+        let mut active = match run_state_managed.active.lock() {
+            Ok(a) => a,
+            Err(_) => return axum::response::Json(serde_json::json!({ "error": "Internal state error" })),
+        };
+        let selected = selected_serials(&request);
+        let busy = read_busy_registry(&root);
+        let busy_selected = selected
+            .iter()
+            .filter(|serial| busy.devices.contains_key(serial.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !busy_selected.is_empty() {
+            return axum::response::Json(serde_json::json!({ "error": format!("Device busy: {}", busy_selected.join(", ")) }));
+        }
+        if let Err(e) = mark_busy_devices(&root, &request, &selected, &run_id) {
+            return axum::response::Json(serde_json::json!({ "error": e }));
+        }
+        active.running = true;
+        active.root = Some(root.clone());
+        active.busy_serials.extend(selected);
+        active.busy_serials.sort();
+        active.busy_serials.dedup();
+    }
+    
+    let selected_serials_started = selected_serials(&request);
+    let _ = app.emit("gba-run-started", serde_json::json!({
+        "run_id": run_id.clone(),
+        "test_type": request.test_type.clone(),
+        "selected_devices": selected_serials_started,
+    }));
+    
+    let run_id_clone = run_id.clone();
+    let webhook_url = payload.webhook_url;
+    
+    thread::spawn(move || {
+        let busy_serials = selected_serials(&request);
+        let result = run_suite_blocking(app.clone(), root, request.clone(), run_id_clone.clone());
+        let exit_code = match result {
+            Ok(code) => code,
+            Err(err) => {
+                emit_log(&app, format!("[runner] {err}"));
+                if err.contains("not found") {
+                    let _ = app.emit("gba-tool-error", err.clone());
+                }
+                1
+            }
+        };
+
+        let (log_file, result_zip) = {
+            let run_state = app.state::<RunState>();
+            let mut active = run_state.active.lock().unwrap();
+            active.busy_serials.retain(|serial| !busy_serials.contains(serial));
+            active.running = !active.busy_serials.is_empty() || !active.pids.is_empty();
+            let lf = active.log_file.clone();
+            if !active.running {
+                active.root = None;
+                active.log_file = None;
+            }
+            let zip = first_zip(&PathBuf::from(&request.auto_root).join("results")).map(|p| p.display().to_string());
+            (lf, zip)
+        };
+
+        clear_busy_devices(
+            &resolve_auto_root(Some(request.auto_root.clone())).unwrap_or_else(|_| PathBuf::from(&request.auto_root)),
+            &busy_serials,
+        );
+
+        let result_dir = latest_result_dir_hint(&request.auto_root);
+        let summary = log_file.map(|lf| parse_summary(&lf, "Test", &busy_serials.join(","), &run_id_clone, &request.test_type));
+
+        let finished_payload = RunFinished {
+            run_id: run_id_clone.clone(),
+            test_type: request.test_type.clone(),
+            exit_code,
+            result_dir: result_dir.clone(),
+            summary,
+            zip_file: result_zip,
+        };
+        let last_status_file = PathBuf::from(&request.auto_root).join(".gba-agentic-last-status");
+        if let Ok(json_str) = serde_json::to_string(&finished_payload) {
+            let _ = fs::write(last_status_file, json_str);
+        }
+        let _ = app.emit("gba-run-finished", finished_payload.clone());
+        
+        // Call webhook if provided
+        if let Some(url) = webhook_url {
+            let _ = thread::spawn(move || {
+                let client = reqwest::blocking::Client::new();
+                let _ = client.post(&url).json(&finished_payload).send();
+            });
+        }
+    });
+
+    axum::response::Json(serde_json::json!({
+        "status": "started",
+        "run_id": run_id,
+    }))
+}
+
+async fn api_preflight(
+    Json(payload): Json<ApiPreflightRequest>,
+) -> axum::response::Json<serde_json::Value> {
+    match preflight(payload.auto_root) {
+        Ok(res) => axum::response::Json(serde_json::json!({ "result": res })),
+        Err(e) => axum::response::Json(serde_json::json!({ "error": e })),
+    }
+}
+
+async fn api_cancel_run(
+    AxumState(state): AxumState<AppState>,
+) -> axum::response::Json<serde_json::Value> {
+    let app = state.app_handle;
+    let run_state = app.state::<RunState>();
+    match cancel_run(app.clone(), run_state) {
+        Ok(_) => axum::response::Json(serde_json::json!({ "status": "cancelled" })),
+        Err(e) => axum::response::Json(serde_json::json!({ "error": e })),
+    }
+}
+
+async fn api_reset_busy_state(
+    AxumState(state): AxumState<AppState>,
+    Json(payload): Json<ApiResetBusyStateRequest>,
+) -> axum::response::Json<serde_json::Value> {
+    match reset_busy_state_helper(&state.app_handle, payload.auto_root) {
+        Ok(_) => axum::response::Json(serde_json::json!({ "status": "reset" })),
+        Err(e) => axum::response::Json(serde_json::json!({ "error": e })),
+    }
+}
+
+async fn api_set_device_lamp(
+    Json(payload): Json<ApiSetDeviceLampRequest>,
+) -> axum::response::Json<serde_json::Value> {
+    match set_device_lamp(payload.serial, payload.brighten) {
+        Ok(_) => axum::response::Json(serde_json::json!({ "status": "updated" })),
+        Err(e) => axum::response::Json(serde_json::json!({ "error": e })),
+    }
+}
+
+async fn api_analyze_laundry_zip(
+    Json(payload): Json<ApiAnalyzeLaundryZipRequest>,
+) -> axum::response::Json<serde_json::Value> {
+    match analyze_laundry_zip(payload.zip_path) {
+        Ok(res) => axum::response::Json(serde_json::json!({ "result": res })),
+        Err(e) => axum::response::Json(serde_json::json!({ "error": e })),
+    }
+}
+
+async fn api_check_laundry_mismatches(
+    Json(payload): Json<ApiCheckLaundryMismatchesRequest>,
+) -> axum::response::Json<serde_json::Value> {
+    match check_laundry_mismatches(payload.auto_root, payload.zip_path) {
+        Ok(res) => axum::response::Json(serde_json::json!({ "result": res })),
+        Err(e) => axum::response::Json(serde_json::json!({ "error": e })),
+    }
+}
+
+use axum::response::IntoResponse;
+
+#[derive(Deserialize)]
+struct DownloadParams {
+    path: String,
+}
+
+async fn api_download_file(
+    Query(params): Query<DownloadParams>,
+) -> impl IntoResponse {
+    let path = PathBuf::from(&params.path);
+    if let Ok(bytes) = std::fs::read(&path) {
+        let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let disposition = format!("attachment; filename=\"{}\"", filename);
+        axum::response::Response::builder()
+            .header(axum::http::header::CONTENT_TYPE, "application/zip")
+            .header(axum::http::header::CONTENT_DISPOSITION, disposition)
+            .body(axum::body::Body::from(bytes))
+            .unwrap()
+    } else {
+        axum::response::Response::builder()
+            .status(axum::http::StatusCode::NOT_FOUND)
+            .body(axum::body::Body::from("File not found"))
+            .unwrap()
+    }
+}
+
+async fn api_get_logs(
+    AxumState(state): AxumState<AppState>,
+) -> axum::response::Json<serde_json::Value> {
+    let app = state.app_handle;
+    let log_file = {
+        let run_state = app.state::<RunState>();
+        let active = run_state.active.lock().unwrap();
+        active.log_file.clone()
+    };
+    if let Some(path) = log_file {
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            let lines: Vec<&str> = content.lines().collect();
+            let start = if lines.len() > 100 { lines.len() - 100 } else { 0 };
+            let last_lines = lines[start..].join("\n");
+            return axum::response::Json(serde_json::json!({ "logs": last_lines }));
+        }
+    }
+    axum::response::Json(serde_json::json!({ "logs": "No active logs found." }))
+}
+
+#[derive(Deserialize)]
+struct RunLogsParams {
+    result_dir: String,
+}
+
+async fn api_get_run_logs(
+    Query(params): Query<RunLogsParams>,
+) -> axum::response::Json<serde_json::Value> {
+    let result_dir = PathBuf::from(&params.result_dir);
+    let log_dir = result_dir.join("Log");
+    if !log_dir.is_dir() {
+        return axum::response::Json(serde_json::json!({ "error": "Log directory not found" }));
+    }
+    
+    let mut combined_logs = String::new();
+    if let Ok(entries) = std::fs::read_dir(&log_dir) {
+        let mut log_files = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_file() && path.extension().and_then(|ext| ext.to_str()) == Some("log") {
+                log_files.push(path);
+            }
+        }
+        
+        // Sort files by modification time
+        log_files.sort_by_key(|p| std::fs::metadata(p).and_then(|m| m.modified()).ok());
+        
+        for path in log_files {
+            let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            if let Ok(content) = std::fs::read_to_string(&path) {
+                let lines: Vec<&str> = content.lines().collect();
+                let start = if lines.len() > 80 { lines.len() - 80 } else { 0 };
+                let last_lines = lines[start..].join("\n");
+                combined_logs.push_str(&format!("--- LOG FILE: {} ---\n{}\n\n", filename, last_lines));
+            }
+        }
+    }
+    
+    if combined_logs.is_empty() {
+        axum::response::Json(serde_json::json!({ "logs": "No log files found." }))
+    } else {
+        axum::response::Json(serde_json::json!({ "logs": combined_logs }))
+    }
+}
+
+async fn api_get_status() -> axum::response::Json<serde_json::Value> {
+    let root = match resolve_auto_root(None) {
+        Ok(r) => r,
+        Err(_) => return axum::response::Json(serde_json::json!({ "status": "IDLE", "error": "Invalid auto_root" })),
+    };
+    
+    // 1. Check if there are active running devices
+    let busy = read_busy_registry(&root);
+    if !busy.devices.is_empty() {
+        let devices: Vec<BusyDevice> = busy.devices.values().cloned().collect();
+        return axum::response::Json(serde_json::json!({
+            "status": "RUNNING",
+            "running_devices": devices,
+            "last_run": serde_json::Value::Null,
+        }));
+    }
+    
+    // 2. Check last finished status
+    let last_status_file = root.join(".gba-agentic-last-status");
+    if last_status_file.is_file() {
+        if let Ok(content) = std::fs::read_to_string(&last_status_file) {
+            if let Ok(last_run) = serde_json::from_str::<serde_json::Value>(&content) {
+                let exit_code = last_run.get("exit_code").and_then(|v| v.as_i64()).unwrap_or(0);
+                let status_str = if exit_code == 0 { "DONE" } else { "FAILED" };
+                return axum::response::Json(serde_json::json!({
+                    "status": status_str,
+                    "running_devices": Vec::<BusyDevice>::new(),
+                    "last_run": last_run,
+                }));
+            }
+        }
+    }
+    
+    axum::response::Json(serde_json::json!({
+        "status": "IDLE",
+        "running_devices": Vec::<BusyDevice>::new(),
+        "last_run": serde_json::Value::Null,
+    }))
+}
+
+#[derive(Deserialize)]
+struct ScreenshotParams {
+    serial: String,
+}
+
+async fn api_screenshot(
+    Query(params): Query<ScreenshotParams>,
+) -> impl IntoResponse {
+    let output = std::process::Command::new("adb")
+        .args(&["-s", &params.serial, "exec-out", "screencap", "-p"])
+        .output();
+    match output {
+        Ok(out) if out.status.success() => {
+            axum::response::Response::builder()
+                .header(axum::http::header::CONTENT_TYPE, "image/png")
+                .body(axum::body::Body::from(out.stdout))
+                .unwrap()
+        }
+        _ => {
+            axum::response::Response::builder()
+                .status(axum::http::StatusCode::INTERNAL_SERVER_ERROR)
+                .body(axum::body::Body::from("Failed to capture screenshot"))
+                .unwrap()
+        }
+    }
 }
 
 #[tauri::command]
@@ -507,14 +934,26 @@ fn open_result(path: String) -> Result<(), String> {
     open_path(Path::new(&path))
 }
 
-#[tauri::command]
-fn reset_busy_state(auto_root: Option<String>) -> Result<(), String> {
+fn reset_busy_state_helper(app: &tauri::AppHandle, auto_root: Option<String>) -> Result<(), String> {
+    let run_state = app.state::<RunState>();
+    if let Ok(mut active) = run_state.active.lock() {
+        active.running = false;
+        active.busy_serials.clear();
+        active.pids.clear();
+        active.root = None;
+        active.log_file = None;
+    }
     let root = resolve_auto_root(auto_root)?;
     let path = busy_registry_path(&root);
     if path.exists() {
         fs::remove_file(&path).map_err(|err| format!("Cannot remove {}: {err}", path.display()))?;
     }
     Ok(())
+}
+
+#[tauri::command]
+fn reset_busy_state(app: tauri::AppHandle, auto_root: Option<String>) -> Result<(), String> {
+    reset_busy_state_helper(&app, auto_root)
 }
 
 #[tauri::command]
@@ -598,6 +1037,11 @@ fn run_suite_blocking(app: AppHandle, root: PathBuf, request: RunSuiteRequest, r
     let log_dir = session_dir.join("Log");
     fs::create_dir_all(&log_dir).map_err(|err| format!("Cannot create result dir: {err}"))?;
     write_latest_result_hint(&root, &session_dir);
+    
+    // Register run.log immediately so early errors are captured
+    let run_log = session_dir.join("run.log");
+    register_log_file(&app, &run_log);
+    
     emit_log(&app, format!("[runner] Result directory: {}", session_dir.display()));
 
     if request.wifi_enabled {
@@ -950,14 +1394,16 @@ fn run_laundry_smr(
             &request.test_type,
         )?;
 
-        codes.extend(run_laundry_cts_filters(
+        codes.extend(run_laundry_retries_with_deviceinfo(
             app,
             root,
             session_dir,
             log_dir,
+            "CTS",
             &request.user_devices,
             &source.extract_root,
             &source.cts_results,
+            &deviceinfo,
             request.timeout_secs,
             model,
             pda,
@@ -1130,60 +1576,6 @@ fn run_laundry_initial_gts(
         .map_err(|err| format!("Cannot preserve deviceinfo {}: {err}", deviceinfo.display()))?;
     emit_log(app, format!("[runner] Deviceinfo preserved: {}", stable_deviceinfo.display()));
     Ok(stable_deviceinfo)
-}
-
-fn run_laundry_cts_filters(
-    app: &AppHandle,
-    root: &Path,
-    session_dir: &Path,
-    log_dir: &Path,
-    devices: &[String],
-    source_root: &Path,
-    source_results: &[PathBuf],
-    timeout_secs: u64,
-    model: &str,
-    pda: &str,
-    run_id: &str,
-    test_type: &str,
-) -> Result<Vec<i32>, String> {
-    let first = devices.first().ok_or_else(|| "Laundry SMR CTS needs user devices".to_string())?;
-    let props = device_props(first).unwrap_or_default();
-    let oneui = prop(&props, "ro.build.version.oneui");
-    let version_hint = if oneui == "80500" {
-        "16.1".to_string()
-    } else {
-        android_major(&prop(&props, "ro.build.version.release"))
-    };
-    let cts_root = resolve_cts_root(root, &version_hint)?;
-    let cts_exe = cts_root.join("tools/cts-tradefed");
-    if !cts_exe.is_file() {
-        return Err(format!("cts-tradefed not found: {}", cts_exe.display()));
-    }
-    let cmd = format!(
-        "run cts --include-filter 'CtsEdiHostTestCases' --include-filter 'CtsLibcoreTestCases tests.targets.security.SignatureTestMD2withRSA#testSignature' --shard-count {}{}",
-        devices.len(),
-        serial_args(devices)
-    );
-    emit_log(app, "[runner] Laundry SMR: running CTS EDI/security filters.");
-    let log_file = log_dir.join(format!("laundry_cts_filters_{}devs.log", devices.len()));
-    let copy_started = SystemTime::now();
-    let result_snapshot = ResultSnapshot::capture(&cts_root.join("results"));
-    emit_laundry_result_updates(app, source_root, source_results, run_id, test_type, "CTS", "Running", 0, None);
-    let outcome = run_suite_process(app, "CTS", devices, &cts_exe, &cts_root, &cmd, true, &log_file, timeout_secs, run_id, test_type, true)?;
-    copy_latest_suite_zip_artifact(app, session_dir, "CTS", &cts_root, &result_snapshot, copy_started, model, pda, devices, "filters")?;
-    let summary = parse_summary(&log_file, "CTS", &devices.join(","), run_id, test_type);
-    emit_laundry_result_updates(
-        app,
-        source_root,
-        source_results,
-        run_id,
-        test_type,
-        "CTS",
-        if outcome.exit_code == 0 { "Test Done" } else { "Failed" },
-        outcome.elapsed_secs,
-        Some(&summary),
-    );
-    Ok(vec![outcome.exit_code])
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1379,37 +1771,6 @@ fn copy_laundry_retry_artifact(
     fs::copy(&zip, &dst)
         .map_err(|err| format!("Cannot copy {} to {}: {err}", zip.display(), dst.display()))?;
     emit_log(app, format!("[{suite}] Retry result copied: {}", dst.display()));
-    Ok(())
-}
-
-fn copy_latest_suite_zip_artifact(
-    app: &AppHandle,
-    session_dir: &Path,
-    suite: &str,
-    suite_root: &Path,
-    result_snapshot: &ResultSnapshot,
-    copy_started: SystemTime,
-    model: &str,
-    pda: &str,
-    devices: &[String],
-    label: &str,
-) -> Result<(), String> {
-    emit_log(app, format!("[runner] {suite}: copying new artifact from {}", suite_root.join("results").display()));
-    let Some(zip) = result_snapshot.newest_zip(&suite_root.join("results"), copy_started) else {
-        emit_log(app, format!("[{suite}] No new zip found in {}", suite_root.join("results").display()));
-        return Ok(());
-    };
-    let dst = session_dir.join(format!(
-        "{}_{}_{}_{}_{}.zip",
-        suite,
-        sanitize_name(label),
-        sanitize_name(model),
-        sanitize_name(pda),
-        sanitize_name(&devices.join("_"))
-    ));
-    fs::copy(&zip, &dst)
-        .map_err(|err| format!("Cannot copy {} to {}: {err}", zip.display(), dst.display()))?;
-    emit_log(app, format!("[{suite}] Result copied: {}", dst.display()));
     Ok(())
 }
 
@@ -1770,6 +2131,7 @@ fn run_suite_process(
         }
     }
 
+    register_log_file(app, log_file);
     pipe_child_output(app.clone(), suite.to_string(), log_file.to_path_buf(), &mut child);
 
     let started = Instant::now();
@@ -2054,13 +2416,14 @@ fn suite_root_for_copy(root: &Path, suite: &str, devices: &[String]) -> Result<P
     }
 }
 
-fn suite_root_for_laundry_result(root: &Path, suite: &str, devices: &[String], _result_dir: &Path) -> Result<PathBuf, String> {
-    if suite == "CTS" {
-        // ponytail: use the lowest CTS revision matching the device OS; add per-result selection only if a retry proves incompatible.
-        return suite_root_for_copy(root, suite, devices);
-    } else if suite == "GTS" {
-        if let Some(version) = suite_version_from_result(_result_dir) {
-            return resolve_gts_root(root, &version);
+fn suite_root_for_laundry_result(root: &Path, suite: &str, devices: &[String], result_dir: &Path) -> Result<PathBuf, String> {
+    if suite == "CTS" || suite == "GTS" {
+        if let Some(version) = suite_version_from_result(result_dir) {
+            return if suite == "CTS" {
+                resolve_cts_root(root, &version)
+            } else {
+                resolve_gts_root(root, &version)
+            };
         }
     }
     suite_root_for_copy(root, suite, devices)
@@ -2068,11 +2431,6 @@ fn suite_root_for_laundry_result(root: &Path, suite: &str, devices: &[String], _
 
 fn resolve_cts_root(root: &Path, version_hint: &str) -> Result<PathBuf, String> {
     resolve_versioned_suite_root(root, "CTS", "android-cts", version_hint)
-}
-
-fn resolve_lowest_cts_root(root: &Path, version_hint: &str) -> Result<PathBuf, String> {
-    let os_version = version_hint.split_once("_r").map_or(version_hint, |(version, _)| version);
-    resolve_cts_root(root, os_version)
 }
 
 fn resolve_gts_root(root: &Path, version_hint: &str) -> Result<PathBuf, String> {
@@ -2173,11 +2531,6 @@ fn tradefed_tool_for_suite(suite_root: &Path, suite: &str) -> Result<PathBuf, St
         "STS" => Ok(suite_root.join("tools/sts-tradefed")),
         _ => Err(format!("Unknown suite: {suite}")),
     }
-}
-
-fn cts_version_from_result(result_dir: &Path) -> Option<String> {
-    let (_, version, _) = get_suite_info_from_xml(&result_dir.join("test_result.xml"))?;
-    suite_version_from_result_version(&version)
 }
 
 fn suite_version_from_result(result_dir: &Path) -> Option<String> {
@@ -2780,32 +3133,6 @@ fn emit_status(
     );
 }
 
-fn emit_laundry_result_updates(
-    app: &AppHandle,
-    source_root: &Path,
-    source_results: &[PathBuf],
-    run_id: &str,
-    test_type: &str,
-    suite: &str,
-    status: &str,
-    elapsed_secs: u64,
-    summary: Option<&SuiteSummary>,
-) {
-    for source in source_results {
-        emit_laundry_result_update(
-            app,
-            source_root,
-            source,
-            run_id,
-            test_type,
-            suite,
-            status,
-            elapsed_secs,
-            summary,
-        );
-    }
-}
-
 #[allow(clippy::too_many_arguments)]
 fn emit_laundry_result_update(
     app: &AppHandle,
@@ -2843,6 +3170,12 @@ fn register_pid(app: &AppHandle, pid: u32) {
 fn unregister_pid(app: &AppHandle, pid: u32) {
     if let Ok(mut active) = app.state::<RunState>().active.lock() {
         active.pids.retain(|value| *value != pid);
+    }
+}
+
+fn register_log_file(app: &AppHandle, log_file: &Path) {
+    if let Ok(mut active) = app.state::<RunState>().active.lock() {
+        active.log_file = Some(log_file.to_path_buf());
     }
 }
 
@@ -3407,6 +3740,13 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(RunState::default())
+        .setup(|app| {
+            let handle = app.handle().clone();
+            tauri::async_runtime::spawn(async move {
+                start_api_server(handle).await;
+            });
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             default_auto_root,
             preflight,

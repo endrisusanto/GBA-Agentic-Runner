@@ -374,6 +374,35 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
+listen("gba-run-started", async (event) => {
+  const payload = event.payload || {};
+  const runId = payload.run_id;
+  const runMode = payload.test_type;
+  const serials = payload.selected_devices || [];
+  
+  if (!state.activeRuns.has(runId)) {
+    state.activeRuns.add(runId);
+    state.runDevices.set(runId, serials);
+    state.flows.set(runId, {
+      mode: runMode,
+      flow: runMode,
+      devices: serials.join(","),
+      model: "Unknown",
+    });
+    
+    // Add to selected devices so they are checked (selected)
+    serials.forEach((serial) => {
+      state.selected.add(serial);
+    });
+  }
+  
+  state.running = true;
+  els.cancelBtn.disabled = false;
+  els.statusLine.textContent = "Running";
+  
+  await refreshDevices();
+});
+
 listen("gba-run-log", (event) => appendLog(String(event.payload || "")));
 listen("gba-suite-status", (event) => {
   const payload = event.payload || {};
@@ -406,8 +435,12 @@ listen("gba-laundry-result-update", (event) => {
 listen("gba-run-finished", (event) => {
   const payload = event.payload || {};
   if (payload.run_id) {
+    const finishedSerials = state.runDevices.get(payload.run_id) || [];
+    finishedSerials.forEach((serial) => {
+      state.selected.delete(serial);
+    });
     state.activeRuns.delete(payload.run_id);
-    clearLocalBusy(state.runDevices.get(payload.run_id) || []);
+    clearLocalBusy(finishedSerials);
     state.runDevices.delete(payload.run_id);
   }
   state.running = state.activeRuns.size > 0;

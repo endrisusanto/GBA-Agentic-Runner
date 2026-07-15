@@ -1,6 +1,6 @@
 [package]
 name = "gba-agentic-runner"
-version = "0.0.32"
+version = "0.0.33"
 description = "GBA Agentic Runner"
 authors = ["GBA Automation"]
 edition = "2021"
@@ -16,3 +16,6 @@ tauri-plugin-dialog = "2"
 tempfile = "3"
 walkdir = "2"
 zip = "2"
+axum = "0.7"
+tokio = { version = "1", features = ["full"] }
+reqwest = { version = "0.12", features = ["json", "blocking"] }
