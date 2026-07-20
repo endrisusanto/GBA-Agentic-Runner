@@ -54,7 +54,7 @@ const TEST_MODES = [
 const state = {
   autoRoot: localStorage.getItem("autoRoot") || "",
   wifi: {
-    enabled: localStorage.getItem("autoWifiAutoConnect") !== "false",
+    enabled: false,
     ssid: localStorage.getItem("autoWifiSsid") || "RTT / IEEE 802.11",
     password: localStorage.getItem("autoWifiPassword") || "1234qwer",
   },
@@ -64,6 +64,7 @@ const state = {
   selected: new Set(),
   selectedMode: "Laundry SMR",
   laundryZipPath: "",
+  laundrySources: [],
   laundryResults: [],
   lockedLaundryResults: new Map(),
   selectedLaundryResults: new Set(),
@@ -434,11 +435,13 @@ listen("gba-summary", (event) => {
 listen("gba-laundry-result-update", (event) => {
   const payload = event.payload || {};
   if (!payload.id) return;
-  const lockedKey = `${payload.run_id || "legacy"}:${payload.id}`;
-  if (state.lockedLaundryResults.has(lockedKey)) {
+  const lockedKey = [...state.lockedLaundryResults.entries()]
+    .find(([key, row]) => key.startsWith(`${payload.run_id || "legacy"}:`) && (row.originalId || row.id) === payload.id)?.[0];
+  if (lockedKey) {
     state.lockedLaundryResults.set(lockedKey, updateLaundryRow(state.lockedLaundryResults.get(lockedKey), payload));
   } else {
-    state.laundryResults = state.laundryResults.map((row) => row.id === payload.id ? updateLaundryRow(row, payload) : row);
+    state.laundryResults = state.laundryResults.map((row) =>
+      (row.originalId || row.id) === payload.id ? updateLaundryRow(row, payload) : row);
   }
   renderFlowMap();
 });
@@ -585,7 +588,7 @@ function renderDevices() {
   [...state.devices]
     .sort((a, b) => {
       const status = (device) => state.completedDevices.has(device.serial) ? 2 : Number(Boolean(device.busy || device.busy_reason));
-      return modelKey(a).localeCompare(modelKey(b)) || status(a) - status(b) || String(a.serial).localeCompare(String(b.serial));
+      return status(a) - status(b) || modelKey(a).localeCompare(modelKey(b)) || String(a.serial).localeCompare(String(b.serial));
     })
     .forEach((device) => {
       const model = device.model || "UNKNOWN_MODEL";
@@ -730,7 +733,7 @@ function renderSelectedStrip() {
     <span><b>Selected</b> ${selectedText}</span>
     <span><b>Model</b> ${escapeHtml(models.join(", ") || "-")}</span>
     <span><b>Type</b> ${escapeHtml(kinds)}</span>
-    <span><b>Zip</b> ${escapeHtml(fileName(state.laundryZipPath))}</span>
+    <span><b>Zip</b> ${escapeHtml(state.laundrySources.map((source) => fileName(source.path)).join(", ") || "-")}</span>
   `;
 }
 
@@ -880,7 +883,7 @@ function renderFlowMap() {
   const lockedRows = [...state.lockedLaundryResults.values()]
     .filter((row) => isLaundryMode(row.mode))
     .sort((a, b) => Number(state.activeRuns.has(b.runId)) - Number(state.activeRuns.has(a.runId)));
-  if (!state.laundryZipPath && !state.laundryResults.length && !lockedRows.length) {
+  if (!state.laundrySources.length && !state.laundryResults.length && !lockedRows.length) {
     els.flowMap.innerHTML = `
       <div class="laundry-table-empty">
         <strong>${escapeHtml(state.selectedMode)}</strong>
@@ -910,7 +913,7 @@ function renderFlowMap() {
   const tabsHtml = `
     <div class="run-table-tabs">
       <button class="run-tab-btn ${state.runTableTab === 'preview' ? 'active' : ''}" data-tab="preview">
-        Preview ${state.laundryZipPath ? '✓' : ''}
+        Preview ${state.laundrySources.length ? `✓ ${state.laundrySources.length}` : ''}
       </button>
       <button class="run-tab-btn ${state.runTableTab === 'running' ? 'active' : ''}" data-tab="running">
         Running (${runningCount})
@@ -924,12 +927,16 @@ function renderFlowMap() {
   let contentHtml = "";
   if (state.runTableTab === "preview") {
     if (state.laundryResults.length) {
-      const selectedCount = state.selectedLaundryResults.size;
-      contentHtml = renderLaundryTableCard({
-        title: `${state.selectedMode} · Picked Zip`,
-        subtitle: `${selectedCount}/${state.laundryResults.length} selected · ${fileName(state.laundryZipPath)}`,
-        rows: state.laundryResults.map((row) => ({ ...row, locked: false, running: false })),
-      });
+      contentHtml = `<div class="laundry-table-stack">${state.laundrySources.map((source) => {
+        const rows = source.rows.map((row) => ({ ...row, locked: false, running: false }));
+        const sourceSelected = rows.filter((row) => state.selectedLaundryResults.has(row.id)).length;
+        const model = source.models.join(", ") || "Model auto-detect";
+        return renderLaundryTableCard({
+          title: `${state.selectedMode} · ${model}`,
+          subtitle: `${sourceSelected}/${rows.length} selected · ${fileName(source.path)}`,
+          rows,
+        });
+      }).join("")}</div>`;
     } else {
       contentHtml = `<div class="empty">No preview zip loaded. Select a laundry mode action to browse and load a zip.</div>`;
     }
@@ -1388,46 +1395,59 @@ function isLaundryMode(modeName) {
 async function chooseLaundryZip() {
   const selected = await open({
     directory: false,
-    multiple: false,
+    multiple: true,
     filters: [{ name: "Laundry zip", extensions: ["zip"] }],
   });
-  const path = normalizeDialogPath(selected);
-  if (path) {
-    state.laundryZipPath = path;
-    state.laundryResults = [];
-    state.selectedLaundryResults = new Set();
-    state.laundryWarnings = [];
-    state.manualSelection = false;
-    appendLog(`[runner] Laundry zip selected: ${path}`);
-    renderFlowMap();
+  const paths = (Array.isArray(selected) ? selected : [selected])
+    .map(normalizeDialogPath)
+    .filter(Boolean);
+  if (!paths.length) return;
+
+  state.laundrySources = [];
+  state.laundryResults = [];
+  state.selectedLaundryResults = new Set();
+  state.laundryWarnings = [];
+  state.manualSelection = false;
+
+  for (const [index, path] of paths.entries()) {
     try {
-      const rows = await invoke("analyze_laundry_zip", { zipPath: path });
-      state.laundryResults = (Array.isArray(rows) ? rows : []).filter((row) => !isCtsVerifierRow(row));
-      state.selectedLaundryResults = new Set(state.laundryResults.map((row) => row.id));
-      appendLog(`[runner] Laundry zip scanned: ${state.laundryResults.length} result(s).`);
-      selectLaundryModelFromResults();
-      
+      const analyzed = await invoke("analyze_laundry_zip", { zipPath: path });
+      const rows = (Array.isArray(analyzed) ? analyzed : []).filter((row) => !isCtsVerifierRow(row));
+      const sourceId = `zip-${index + 1}`;
+      const sourceRows = (Array.isArray(rows) ? rows : []).map((row) => ({
+        ...row,
+        id: `${sourceId}:${row.id}`,
+        originalId: row.id,
+        sourceId,
+        sourcePath: path,
+      }));
+      const source = { id: sourceId, path, rows: sourceRows };
+      source.models = laundryPreviewModelsForSource(source, state.devices);
+      state.laundrySources.push(source);
+      state.laundryResults.push(...sourceRows);
+      sourceRows.forEach((row) => state.selectedLaundryResults.add(row.id));
+      appendLog(`[runner] Laundry zip scanned: ${fileName(path)} (${sourceRows.length} result(s), model ${source.models.join(", ") || "auto"}).`);
       try {
         const autoRoot = state.autoRoot || await invoke("default_auto_root");
         const warnings = await invoke("check_laundry_mismatches", { autoRoot, zipPath: path });
-        state.laundryWarnings = Array.isArray(warnings) ? warnings : [];
-    if (state.laundryWarnings.length > 0) {
-          appendLog(`[runner] Mismatched tools check: Found ${state.laundryWarnings.length} warning(s).`);
-          renderPreflight();
-          showInfoModal("Mismatched Tools Warning", "Some required tools are mismatched or missing.", state.laundryWarnings, "warning");
-        }
-      } catch (err) {
-        appendLog(`[runner] Tool version mismatch check failed: ${err}`);
+        state.laundryWarnings.push(...(Array.isArray(warnings) ? warnings : []));
+      } catch (error) {
+        appendLog(`[runner] Tool version mismatch check failed (${fileName(path)}): ${error}`);
       }
-
-      renderFlowMap();
     } catch (error) {
-      appendLog(`[runner] Laundry zip scan failed: ${error}`);
-      els.statusLine.textContent = "Laundry zip scan failed";
-      showInfoModal("Laundry Zip Scan Failed", "Cannot read selected laundry zip.", [String(error)], "error");
-      renderFlowMap();
+      appendLog(`[runner] Laundry zip scan failed (${fileName(path)}): ${error}`);
+      showInfoModal("Laundry Zip Scan Failed", `Cannot read ${fileName(path)}.`, [String(error)], "error");
     }
   }
+
+  state.laundryZipPath = state.laundrySources[0]?.path || "";
+  if (!state.laundrySources.length) return;
+  if (state.laundryWarnings.length) {
+    renderPreflight();
+    showInfoModal("Mismatched Tools Warning", "Some required tools are mismatched or missing.", state.laundryWarnings, "warning");
+  }
+  selectLaundryModelFromResults();
+  renderFlowMap();
 }
 
 async function runSelected() {
@@ -1435,14 +1455,14 @@ async function runSelected() {
   const mode = TEST_MODES.find((item) => item.id === state.selectedMode);
   const runMode = state.selectedMode;
   const runFlow = currentModeFlow();
-  if (isLaundryMode(runMode) && !state.laundryZipPath) {
+  if (isLaundryMode(runMode) && !state.laundrySources.length) {
     await chooseLaundryZip();
-    if (state.laundryZipPath) {
+    if (state.laundrySources.length) {
       appendLog("[runner] Laundry zip loaded. Select testcase rows, then click Run Selected again.");
       els.statusLine.textContent = "Select laundry testcase rows";
       return;
     }
-    if (!state.laundryZipPath) {
+    if (!state.laundrySources.length) {
       appendLog("[runner] Laundry flow needs zip file.");
       els.statusLine.textContent = "Laundry zip required";
       showInfoModal("Laundry Zip Required", "Pick a laundry result zip before running.", ["No zip selected."], "error");
@@ -1479,9 +1499,26 @@ async function runSelected() {
     showInfoModal("No Runnable Device Group", "Selected devices do not match this mode.", ["Use Select to pick a same-model ready group."], "error");
     return;
   }
+  const runPlans = groups.map((group) => {
+    if (!isLaundryMode(runMode)) return { source: null, selectedUiIds: [], selectedIds: [] };
+    const model = modelKey(group.devices[0]);
+    const source = laundrySourceForModel(model);
+    if (!source) return { error: `Tidak ada laundry ZIP yang cocok untuk model ${model}.` };
+    const selectedRows = state.laundryResults.filter((row) =>
+      row.sourceId === source.id && state.selectedLaundryResults.has(row.id));
+    if (!selectedRows.length) return { error: `Tidak ada testcase terpilih dari ZIP untuk model ${model}.` };
+    return {
+      source,
+      selectedUiIds: selectedRows.map((row) => row.id),
+      selectedIds: selectedRows.map((row) => row.originalId || row.id),
+    };
+  });
+  const planError = runPlans.find((plan) => plan.error)?.error;
+  if (planError) {
+    showInfoModal("Laundry ZIP Model Mismatch", "Each selected model needs its matching laundry ZIP.", [planError], "error");
+    return;
+  }
   const runnableDevices = groups.flatMap((group) => group.devices);
-  const laundryZipPathForRun = state.laundryZipPath;
-  const selectedLaundryResultsForRun = [...state.selectedLaundryResults];
 
   state.running = true;
   state.resultDir = "";
@@ -1516,7 +1553,8 @@ async function runSelected() {
       devices: groupSerials.join(","),
       model: groupModels || "Unknown",
     });
-    if (isLaundryMode(runMode)) lockLaundryRowsForRun(runId, runMode, groupSerials);
+    const plan = runPlans[index];
+    if (isLaundryMode(runMode)) lockLaundryRowsForRun(runId, runMode, groupSerials, plan.selectedUiIds);
     createRunLogFlow(runId, runMode, groupDevices);
     appendLog(`[runner] Starting shard ${index + 1}/${groups.length}: ${group.kind} fingerprint=${shortFingerprint(group.fingerprint)} devices=${groupSerials.join(",")}`);
     renderFlowMap();
@@ -1527,12 +1565,12 @@ async function runSelected() {
           run_id: runId,
           auto_root: autoRoot,
           test_type: runMode,
-          laundry_zip_path: isLaundryMode(runMode) ? laundryZipPathForRun : null,
-          selected_laundry_results: isLaundryMode(runMode) ? selectedLaundryResultsForRun : [],
+          laundry_zip_path: isLaundryMode(runMode) ? plan.source.path : null,
+          selected_laundry_results: isLaundryMode(runMode) ? plan.selectedIds : [],
           user_devices: groupUserDevices,
           userdebug_devices: groupUserdebugDevices,
           retry_count: state.retryCount,
-          wifi_enabled: state.wifi.enabled,
+          wifi_enabled: false,
           wifi_ssid: state.wifi.ssid,
           wifi_password: state.wifi.password,
           timeout_secs: state.timeoutSecs,
@@ -1547,6 +1585,12 @@ async function runSelected() {
     }
   }
 
+  if (isLaundryMode(runMode)) {
+    state.laundryResults = [];
+    state.selectedLaundryResults = new Set();
+    state.laundrySources = [];
+    state.laundryZipPath = "";
+  }
   state.running = state.activeRuns.size > 0;
   els.cancelBtn.disabled = state.activeRuns.size === 0;
   els.statusLine.textContent = state.running ? "Running" : "Run failed";
@@ -1569,8 +1613,8 @@ function markLocalBusy(devices, testType) {
   });
 }
 
-function lockLaundryRowsForRun(runId, mode, serials) {
-  const selected = new Set(state.selectedLaundryResults);
+function lockLaundryRowsForRun(runId, mode, serials, selectedIds = [...state.selectedLaundryResults]) {
+  const selected = new Set(selectedIds);
   state.laundryResults
     .filter((row) => selected.has(row.id))
     .forEach((row) => {
@@ -1583,9 +1627,6 @@ function lockLaundryRowsForRun(runId, mode, serials) {
         status: "Queued",
       });
     });
-  state.laundryResults = [];
-  state.selectedLaundryResults = new Set();
-  state.laundryZipPath = "";
 }
 
 function isCtsVerifierRow(row) {
@@ -1769,31 +1810,30 @@ function selectLaundryModelFromResults() {
   if (!isLaundryMode(state.selectedMode) || !state.devices.length) return false;
   const readyDevices = state.devices.filter((device) => device.state === "device" && !device.busy);
   const selectedRows = state.laundryResults.filter((row) => !state.selectedLaundryResults.size || state.selectedLaundryResults.has(row.id));
-  if (!selectedRows.length || state.selected.size) return false;
-  const hintedModels = laundryPreviewModels(selectedRows, readyDevices);
-  if (hintedModels.length) {
-    const serials = readyDevices
-      .filter((device) => hintedModels.includes(modelKey(device)))
-      .map((device) => device.serial);
-    if (serials.length) {
-      state.selected = new Set(serials);
-      appendLog(`[runner] Auto-selected ${serials.length} device(s) from Preview model(s): ${hintedModels.join(", ")}.`);
-      return true;
-    }
-  }
-
+  if (!selectedRows.length) return false;
   const needs = laundryNeeds(selectedRows);
-  const fallback = readyDevices.find((device) => {
-    const sameModel = readyDevices.filter((item) => modelKey(item) === modelKey(device));
-    if (needs.user && !sameModel.some((item) => !item.is_userdebug)) return false;
-    if (needs.userdebug && !sameModel.some((item) => item.is_userdebug)) return false;
-    return true;
+  const hintedModels = [...new Set([
+    ...state.laundrySources.flatMap((source) => source.models),
+    ...laundryPreviewModels(selectedRows, readyDevices),
+  ])];
+  const runnableModels = hintedModels.filter((model) => {
+    const sameModel = readyDevices.filter((device) => modelKey(device) === model);
+    return (!needs.user || sameModel.some((device) => !device.is_userdebug)) &&
+      (!needs.userdebug || sameModel.some((device) => device.is_userdebug));
   });
-  return fallback ? selectReadyModel(modelKey(fallback)) : false;
+  if (runnableModels.length) {
+    const serials = readyDevices
+      .filter((device) => runnableModels.includes(modelKey(device)))
+      .map((device) => device.serial);
+    state.selected = new Set(serials);
+    appendLog(`[runner] Auto-selected ${serials.length} device(s) for model(s): ${runnableModels.join(", ")}.`);
+    return true;
+  }
+  return false;
 }
 
 function laundryPreviewHint(rows) {
-  return `${state.laundryZipPath} ${rows.map((row) => [
+  return `${state.laundrySources.map((source) => source.path).join(" ")} ${rows.map((row) => [
     row.id,
     row.model,
     row.device_model,
@@ -1801,6 +1841,27 @@ function laundryPreviewHint(rows) {
     row.testcase,
     row.result_dir,
   ].filter(Boolean).join(" ")).join(" ")}`.toUpperCase();
+}
+
+function laundryPreviewModelsForSource(source, devices = state.devices) {
+  const hint = `${source.path} ${source.rows.map((row) => [
+    row.id,
+    row.originalId,
+    row.model,
+    row.device_model,
+    row.deviceModel,
+    row.testcase,
+    row.result_dir,
+  ].filter(Boolean).join(" ")).join(" ")}`.toUpperCase();
+  return [...new Set(devices.map(modelKey))]
+    .filter((model) => model !== "UNKNOWN_MODEL" && modelMatchesPreview(model, hint));
+}
+
+function laundrySourceForModel(model) {
+  const matches = state.laundrySources.filter((source) => source.models.includes(model));
+  if (matches.length === 1) return matches[0];
+  if (state.laundrySources.length === 1) return state.laundrySources[0];
+  return null;
 }
 
 function modelMatchesPreview(model, hint) {
@@ -1875,10 +1936,7 @@ function validateLaundrySmrSelection() {
     if (!hasUser && !hasUserdebug) return "Laundry SMR needs at least one device.";
   }
 
-  const models = new Set(selectedDevices.map(modelKey));
-  if (models.size > 1) return `Laundry SMR devices must use the same model: ${[...models].join(", ")}`;
-  const families = new Set(selectedDevices.map(fingerprintFamilyKey));
-  if (families.size > 1) return `Laundry SMR devices must use the same fingerprint family: ${[...families].join(", ")}`;
+  // Multiple models are valid: runSelected shards them and assigns each ZIP per model.
   return "";
 }
 
@@ -1965,6 +2023,7 @@ function clearLogView() {
 function clearInactiveTableCards() {
   state.laundryResults = [];
   state.selectedLaundryResults = new Set();
+  state.laundrySources = [];
   state.laundryZipPath = "";
   state.laundryWarnings = [];
   for (const [key, row] of [...state.lockedLaundryResults.entries()]) {

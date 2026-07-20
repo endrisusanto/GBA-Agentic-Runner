@@ -25,6 +25,8 @@ use axum::{
 use tokio::net::TcpListener;
 
 const DEVICE_RECONNECT_TIMEOUT_SECS: u64 = 300;
+// ponytail: serialize GTS tradefed to protect the shared ADB server; shard/process parallelism can be added if ADB isolation is available.
+static GTS_RUN_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -187,6 +189,14 @@ struct BusyDevice {
     started_at: String,
     result_dir: Option<String>,
     current_suite: Option<String>,
+    #[serde(default)]
+    suite_statuses: HashMap<String, SuiteRuntimeStatus>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+struct SuiteRuntimeStatus {
+    status: String,
+    elapsed_secs: u64,
 }
 
 #[derive(Default)]
@@ -236,6 +246,10 @@ fn default_auto_root() -> Result<String, String> {
 fn preflight(auto_root: Option<String>) -> Result<Vec<String>, String> {
     let root = resolve_auto_root(auto_root)?;
     let mut lines = vec![format!("Root: {}", root.display())];
+    match prepare_ghidra_for_sts() {
+        Ok(message) => lines.push(format!("OK Ghidra: {}", message.trim())),
+        Err(error) => lines.push(format!("MISS Ghidra: {error}")),
+    }
     lines.push(check_command("adb"));
     lines.push(check_command("java"));
     lines.push(check_dir("CTS", root.join("CTS")));
@@ -253,6 +267,17 @@ fn preflight(auto_root: Option<String>) -> Result<Vec<String>, String> {
         lines.push(check_file(
             &format!("GTS/{version}/tools/gts-tradefed"),
             gts_root.join("tools/gts-tradefed"),
+        ));
+    }
+    if let Ok(gts_root) = resolve_gts_root(&root, "") {
+        let version = gts_root
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            .unwrap_or("default");
+        lines.push(check_file(
+            &format!("GTS/{version}/subplans/gtsmr.xml"),
+            gts_root.join("subplans/gtsmr.xml"),
         ));
     }
 
@@ -719,7 +744,7 @@ async fn api_diagnostics(
             .map(|output| String::from_utf8_lossy(&output.stdout).to_string())
             .unwrap_or_else(|err| format!("PC resource failed: {err}")),
         "speed" => Command::new("sh")
-            .args(["-c", "download=$(curl -L -sS -o /dev/null -w '%{speed_download}' --max-time 15 'https://speed.cloudflare.com/__down?bytes=10000000'); upload=$(head -c 10000000 /dev/zero | curl -L -sS -X POST --data-binary @- -o /dev/null -w '%{speed_upload}' --max-time 15 'https://speed.cloudflare.com/__up'); awk -v d=\"$download\" -v u=\"$upload\" 'BEGIN {printf \"🌐 INTERNET SPEED\\n\\nDownload │ %.2f MB/s\\nUpload   │ %.2f MB/s\\n\", d*8/1000000, u*8/1000000}'"])
+            .args(["-c", "download=$(curl -L -sS -o /dev/null -w '%{speed_download}' --max-time 15 'https://speed.cloudflare.com/__down?bytes=10000000'); upload=$(head -c 10000000 /dev/zero | curl -L -sS -X POST --data-binary @- -o /dev/null -w '%{speed_upload}' --max-time 15 'https://speed.cloudflare.com/__up'); awk -v d=\"$download\" -v u=\"$upload\" 'BEGIN {printf \"🌐 INTERNET SPEED\\n\\n%-10s │ %.2f MB/s\\n%-10s │ %.2f MB/s\\n\", \"Download\", d*8/1000000, \"Upload\", u*8/1000000}'"])
             .output()
             .map(|output| String::from_utf8_lossy(&output.stdout).to_string())
             .unwrap_or_else(|err| format!("Internet speed failed: {err}")),
@@ -1094,6 +1119,7 @@ async fn api_get_status() -> axum::response::Json<serde_json::Value> {
         return axum::response::Json(serde_json::json!({
             "status": "RUNNING",
             "running_devices": devices,
+            "suites": running_suite_statuses(&busy),
             "log_options": log_flow_options(&root),
             "last_run": serde_json::Value::Null,
         }));
@@ -1122,6 +1148,28 @@ async fn api_get_status() -> axum::response::Json<serde_json::Value> {
         "log_options": Vec::<LogFlowOption>::new(),
         "last_run": serde_json::Value::Null,
     }))
+}
+
+fn running_suite_statuses(registry: &BusyRegistry) -> Vec<serde_json::Value> {
+    let mut grouped: HashMap<(String, String), (String, u64, Vec<String>)> = HashMap::new();
+    for device in registry.devices.values() {
+        for (suite, detail) in &device.suite_statuses {
+            let key = (device.run_id.clone(), suite.clone());
+            let entry = grouped.entry(key).or_insert_with(|| (detail.status.clone(), detail.elapsed_secs, Vec::new()));
+            entry.0 = detail.status.clone();
+            entry.1 = entry.1.max(detail.elapsed_secs);
+            entry.2.push(device.serial.clone());
+        }
+    }
+    grouped.into_iter().map(|((run_id, suite), (status, elapsed_secs, devices))| {
+        serde_json::json!({
+            "run_id": run_id,
+            "suite": suite,
+            "status": status,
+            "elapsed_secs": elapsed_secs,
+            "devices": devices,
+        })
+    }).collect()
 }
 
 #[derive(Deserialize)]
@@ -1362,6 +1410,10 @@ fn run_suite_blocking(app: AppHandle, root: PathBuf, request: RunSuiteRequest, r
     let retry_args = retry_args(request.retry_count);
     let mut exit_codes = Vec::new();
 
+    if matches!(request.test_type.as_str(), "STS" | "Laundry SMR") {
+        ensure_ghidra_for_sts(&app)?;
+    }
+
     match request.test_type.as_str() {
         "Laundry SMR" => {
             let outcome = run_laundry_smr(
@@ -1526,6 +1578,29 @@ fn run_suite_blocking(app: AppHandle, root: PathBuf, request: RunSuiteRequest, r
     emit_log(&app, format!("[runner] Completed with exit={final_code}."));
     let _ = fs::remove_dir_all(root.join(".gba-workspaces").join(sanitize_name(&run_id)));
     Ok(final_code)
+}
+
+fn ensure_ghidra_for_sts(app: &AppHandle) -> Result<(), String> {
+    emit_log(app, "[runner] Preparing Ghidra for STS...".to_string());
+    let message = prepare_ghidra_for_sts()?;
+    emit_log(app, message);
+    Ok(())
+}
+
+fn prepare_ghidra_for_sts() -> Result<String, String> {
+    let updater = Path::new("/home/endri-pro/Documents/ghidra/download_ghidra.sh");
+    if !updater.is_file() {
+        return Err(format!("Ghidra updater not found: {}", updater.display()));
+    }
+    let output = Command::new("bash")
+        .arg(updater)
+        .output()
+        .map_err(|err| format!("Cannot start Ghidra updater: {err}"))?;
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        return Err(format!("Ghidra updater failed{}", if detail.is_empty() { String::new() } else { format!(": {detail}") }));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 #[derive(Debug, Clone)]
@@ -1835,6 +1910,9 @@ fn run_laundry_initial_gts(
     let gts_exe = gts_workspace.join("tools/gts-tradefed");
     if !gts_exe.is_file() {
         return Err(format!("gts-tradefed not found: {}", gts_exe.display()));
+    }
+    if !gts_workspace.join("subplans/gtsmr.xml").is_file() {
+        return Err(format!("GTS subplan not found: {}", gts_workspace.join("subplans/gtsmr.xml").display()));
     }
     let cmd = format!(
         "{gts_command} --shard-count {}{}",
@@ -2407,6 +2485,11 @@ fn run_suite_process(
     test_type: &str,
     publish_status: bool,
 ) -> Result<SuiteOutcome, String> {
+    let _gts_guard = if suite == "GTS" {
+        Some(GTS_RUN_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|err| err.into_inner()))
+    } else {
+        None
+    };
     let devices_text = devices.join(",");
     if publish_status {
         emit_status(app, suite, "Starting", &devices_text, 0, log_file, run_id, test_type);
@@ -3490,7 +3573,10 @@ fn suite_workspace(root: &Path, suite_root: &Path, run_id: &str) -> Result<PathB
                 continue;
             }
             let target = install.join(&name);
-            if name == "tools" && entry.path().is_dir() {
+            if name == "subplans" && entry.path().is_dir() {
+                copy_dir_recursive(&entry.path(), &target)
+                    .map_err(|err| format!("Cannot copy subplans: {err}"))?;
+            } else if name == "tools" && entry.path().is_dir() {
                 fs::create_dir(&target).map_err(|err| format!("Cannot create workspace tools: {err}"))?;
                 for tool in fs::read_dir(entry.path()).map_err(|err| err.to_string())?.flatten() {
                     let tool_target = target.join(tool.file_name());
@@ -3584,9 +3670,7 @@ fn emit_status(
     );
     
     if let Ok(root) = resolve_auto_root(None) {
-        if status == "Running" || status == "Starting" {
-            update_busy_device_suite(&root, run_id, suite, devices);
-        }
+        update_busy_device_suite(&root, run_id, suite, status, elapsed_secs, devices);
     }
 }
 
@@ -3741,13 +3825,17 @@ fn write_busy_registry(root: &Path, registry: &BusyRegistry) -> Result<(), Strin
     fs::rename(&tmp, &path).map_err(|err| format!("Cannot replace {}: {err}", path.display()))
 }
 
-fn update_busy_device_suite(root: &std::path::Path, run_id: &str, suite: &str, serials: &str) {
+fn update_busy_device_suite(root: &std::path::Path, run_id: &str, suite: &str, status: &str, elapsed_secs: u64, serials: &str) {
     let _guard = BUSY_REGISTRY_LOCK.get_or_init(|| Mutex::new(())).lock().ok();
     let mut busy = read_busy_registry(root);
     let serials = serials.split(',').collect::<HashSet<_>>();
     for device in busy.devices.values_mut() {
         if device.run_id == run_id && serials.contains(device.serial.as_str()) {
             device.current_suite = Some(suite.to_string());
+            device.suite_statuses.insert(suite.to_string(), SuiteRuntimeStatus {
+                status: status.to_string(),
+                elapsed_secs,
+            });
         }
     }
     let _ = write_busy_registry(root, &busy);
@@ -3790,6 +3878,7 @@ fn mark_busy_devices(root: &Path, request: &RunSuiteRequest, serials: &[String],
                 started_at: started_at.clone(),
                 result_dir: None,
                 current_suite: Some("SOURCE".to_string()),
+                suite_statuses: HashMap::new(),
             },
         );
     }

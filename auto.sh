@@ -8,7 +8,7 @@ set -uo pipefail
 # -- Constants --
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly RESULTS_DIR="${SCRIPT_DIR}/Results"
-readonly ENABLE_WIFI_CONNECTION=true
+readonly ENABLE_WIFI_CONNECTION=false
 readonly WIFI_SSID="RTT / IEEE 802.11"
 readonly WIFI_PASSWORD="1234qwer"
 readonly REQUIRED_COMMANDS=("adb" "gum" "zenity" "column" "java" "tput")
