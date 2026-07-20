@@ -1,0 +1,1359 @@
+{
+  "name": "GBA Bot - Robust v2",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "message",
+          "callback_query"
+        ],
+        "additionalFields": {}
+      },
+      "id": "tg-trigger",
+      "name": "Telegram Trigger",
+      "type": "n8n-nodes-base.telegramTrigger",
+      "typeVersion": 1.1,
+      "position": [
+        -1600,
+        800
+      ],
+      "webhookId": "d46c0f75-e7ce-4431-ac18-9e0dac427f96",
+      "credentials": {
+        "telegramApi": {
+          "id": "WgXKDS79dUDYK1c9",
+          "name": "Telegram Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "http://192.168.10.221:3031/start-runner",
+        "options": {},
+        "method": "POST"
+      },
+      "id": "ensure-runner",
+      "name": "Ensure Runner",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -1400,
+        800
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "url": "http://192.168.10.221:3030/api/devices",
+        "options": {}
+      },
+      "id": "get-devices",
+      "name": "Get Devices",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -1200,
+        800
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst devices = items.length > 0 ? items.map(i => i.json) : [];\nconst ready = devices.filter(d => d.state === 'device' && !d.busy).sort((a, b) =>\n  String(a.model || '').localeCompare(String(b.model || '')) ||\n  String(a.serial || '').localeCompare(String(b.serial || ''))\n);\n\nlet chat_id = 0, msg_text = '', cb_data = '', cb_id = '';\ntry {\n  const p = $('Telegram Trigger').first().json;\n  if (p.message) {\n    chat_id = p.message.chat.id;\n    msg_text = p.message.text || '';\n  } else if (p.callback_query) {\n    chat_id = p.callback_query.message.chat.id;\n    cb_data  = p.callback_query.data || '';\n    cb_id    = p.callback_query.id || '';\n  }\n} catch(e) {}\n\nconst cmd = msg_text.trim().toLowerCase();\nconst mainMenu = { inline_keyboard: [\n  [{ text: '\\ud83d\\udcfa Perangkat & Run', callback_data: 'menu_list' }],\n  [{ text: '\\ud83d\\udcca Status', callback_data: 'menu_status' }, { text: '\\ud83d\\udccb Log', callback_data: 'menu_log' }],\n  [{ text: '\\u26d4 Cancel', callback_data: 'menu_cancel' }, { text: '\\ud83d\\udd04 Reset', callback_data: 'menu_reset' }],\n  [{ text: 'PC Resource', callback_data: 'diag_resource' }, { text: 'Internet Speed', callback_data: 'diag_speed' }],\n  [{ text: 'Tools Version', callback_data: 'diag_tools' }]\n]};\n\nconst mk = (action, text, markup, extra) => [{ json: Object.assign(\n  { action, chat_id, cb_id, pending_text: text, reply_markup: markup || null, main_menu: mainMenu,\n    serial: '', test_type: '', user_devices: [], userdebug_devices: [] },\n  extra || {}\n)}];\n\nif (cb_data.startsWith('shot_')) {\n  const serial = cb_data.slice(5);\n  const dev = devices.find(d => d.serial === serial);\n  return mk('screenshot', '\\ud83d\\udcf8 Screenshot ' + (dev && dev.model || serial) + '...', null, { serial });\n}\nif (cb_data === 'menu_status' || cmd === '/status') return mk('status', '\\u23f3 Mengambil status...', null, {});\nif (cb_data === 'menu_log'    || cmd === '/log')    return mk('log',    '\\u23f3 Mengambil log...', null, {});\nif (cb_data.startsWith('log_run_')) {\n  const run_id = cb_data.slice('log_run_'.length);\n  return mk('log_fetch', '\\ud83d\\udccb Mengambil log flow...', null, {\n    run_id,\n  });\n}\nif (cb_data.startsWith('zip_')) {\n  const parts = cb_data.slice(4).split('|');\n  return mk('zip_fetch', 'Mengirim zip result...', null, { run_id: parts[0], zip_id: Number(parts[1]) });\n}\nif (cb_data === 'menu_cancel' || cmd === '/cancel') return mk('cancel', '\\u26d4 Membatalkan tes...', null, {});\nif (cb_data === 'menu_reset'  || cmd === '/reset')  return mk('reset',  '\\ud83d\\udd04 Mereset status...', null, {});\nif (cb_data.startsWith('diag_')) return mk('diagnostics', 'Mengambil diagnostics...', null, { diagnostic_type: cb_data.slice(5) });\n\nif (cb_data.startsWith('test_')) {\n  const m = cb_data.match(/^test_([^_]+)_(.+)$/);\n  if (!m) return mk('menu', '\\u274c Command tidak valid.', mainMenu, {});\n  const test_type = m[1], nums = m[2].split(',').map(Number);\n  const all_conn = devices.filter(d => d.state === 'device');\n  const getD = n => ready[n-1] || all_conn[n-1] || devices[n-1] || {};\n  const user_devices      = nums.map(getD).filter(d => d.serial && !d.is_userdebug).map(d => d.serial);\n  const userdebug_devices = nums.map(getD).filter(d => d.serial &&  d.is_userdebug).map(d => d.serial);\n  return mk('run',\n    '\\ud83d\\ude80 Memulai ' + test_type + ': ' + [...user_devices, ...userdebug_devices].join(', ') + '...',\n    null, { test_type, user_devices, userdebug_devices }\n  );\n}\n\nif (cb_data === 'menu_list' || cmd.startsWith('/run')) {\n  if (!ready.length) return mk('menu', '\\u274c Tidak ada perangkat siap.', mainMenu, {});\n  const runM = msg_text.match(/^\\/run\\s+(.+)$/i);\n  if (runM) {\n    const nums = runM[1].split(',').map(s => parseInt(s.trim())).filter(n => n > 0 && n <= ready.length);\n    if (!nums.length) return mk('menu', '\\u274c Nomor tidak valid.', mainMenu, {});\n    return mk('menu', 'Pilih tes untuk ' + nums.join(', ') + ':', { inline_keyboard: [\n      [{ text: '\\u25b6\\ufe0f MR',  callback_data: 'test_MR_'  + nums.join(',') },\n       { text: '\\u25b6\\ufe0f SMR', callback_data: 'test_SMR_' + nums.join(',') }],\n      [{ text: '\\u25b6\\ufe0f SKU', callback_data: 'test_SKU_' + nums.join(',') },\n       { text: '\\u25b6\\ufe0f STS', callback_data: 'test_STS_' + nums.join(',') }],\n      [{ text: '\\ud83d\\udd19 Kembali', callback_data: 'menu_main' }]\n    ]}, {});\n  }\n  const values = ready.map(d => ({ model: String(d.model || '-'), type: d.is_userdebug ? 'USERDEBUG' : 'USER', pda: String(d.pda || '-'), code: String(d.sales_code || '-') }));\n  const widths = {\n    no: Math.max(2, String(ready.length).length),\n    model: Math.max(5, ...values.map(d => d.model.length)),\n    type: Math.max(4, ...values.map(d => d.type.length)),\n    pda: Math.max(3, ...values.map(d => d.pda.length)),\n    code: Math.max(4, ...values.map(d => d.code.length))\n  };\n  const cell = (value, width) => { const text = String(value || '-').slice(0, width); const pad = width - text.length; return ' '.repeat(Math.floor(pad / 2)) + text + ' '.repeat(Math.ceil(pad / 2)); };\n  const rows = [cell('No', widths.no) + ' │ ' + cell('Model', widths.model) + ' │ ' + cell('Type', widths.type) + ' │ ' + cell('PDA', widths.pda) + ' │ ' + cell('Code', widths.code)];\n  const kb = [];\n  let deviceRow = [];\n  ready.forEach((d, i) => {\n    const value = values[i];\n    rows.push(cell(i + 1, widths.no) + ' │ ' + cell(value.model, widths.model) + ' │ ' + cell(value.type, widths.type) + ' │ ' + cell(value.pda, widths.pda) + ' │ ' + cell(value.code, widths.code));\n    deviceRow.push({ text: '\\ud83d\\udcf8 ' + (d.model||d.serial), callback_data: 'shot_' + d.serial });\n    if (deviceRow.length === 3) { kb.push(deviceRow); deviceRow = []; }\n  });\n  if (deviceRow.length) kb.push(deviceRow);\n  const msg = '\\ud83d\\udcfa *Daftar Perangkat Siap Tes:*\\n\\n```\\n' + rows.join('\\n') + '\\n```\\n\\ud83d\\udc49 Ketik `/run 1,2` untuk memilih';\n  kb.push([{ text: '\\ud83d\\udd19 Kembali', callback_data: 'menu_main' }]);\n  return mk('menu', msg, { inline_keyboard: kb }, {});\n}\n\nreturn mk('menu', '\\ud83e\\udd16 *GBA Agentic Bot*\\n\\nPilih aksi:', mainMenu, {});\n"
+      },
+      "id": "format-data",
+      "name": "Format Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1000,
+        800
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://api.telegram.org/bot8718749688:AAEYhrEul8UNdH-MEU9jJjLIOnuVjsGknW8/answerCallbackQuery",
+        "options": {},
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"callback_query_id\": $json.cb_id } }}"
+      },
+      "id": "answer-cb",
+      "name": "Answer Callback",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -800,
+        600
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.action }}",
+              "operation": "equal",
+              "value2": "run"
+            }
+          ]
+        }
+      },
+      "id": "if-run",
+      "name": "IF: Is Run?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        -600,
+        800
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://api.telegram.org/bot8718749688:AAEYhrEul8UNdH-MEU9jJjLIOnuVjsGknW8/sendMessage",
+        "options": {},
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.reply_markup ? { \"chat_id\": $json.chat_id, \"text\": $json.pending_text, \"parse_mode\": \"Markdown\", \"reply_markup\": $json.reply_markup } : { \"chat_id\": $json.chat_id, \"text\": $json.pending_text, \"parse_mode\": \"Markdown\" } }}"
+      },
+      "id": "send-run-msg",
+      "name": "Send Run Message",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -400,
+        600
+      ]
+    },
+    {
+      "parameters": {
+        "url": "http://192.168.10.221:3030/api/run-suite",
+        "options": {},
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"test_type\": $('Format Data').first().json.test_type, \"user_devices\": $('Format Data').first().json.user_devices, \"userdebug_devices\": $('Format Data').first().json.userdebug_devices, \"auto_root\": \"/run/media/endri-pro/BINARY_HDD/AUTO\", \"retry_count\": 5, \"wifi_enabled\": false, \"wifi_ssid\": \"RTT / IEEE 802.11\", \"wifi_password\": \"1234qwer\", \"timeout_secs\": 86400, \"webhook_url\": $execution.resumeUrl } }}"
+      },
+      "id": "start-test",
+      "name": "Start Test Suite",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -200,
+        600
+      ]
+    },
+    {
+      "parameters": {
+        "resume": "webhook",
+        "options": {}
+      },
+      "id": "wait-test",
+      "name": "Wait for Test",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        -200,
+        750
+      ],
+      "webhookId": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "number": [
+            {
+              "value1": "={{ $json.body.exit_code }}",
+              "operation": "equal",
+              "value2": 0
+            }
+          ]
+        }
+      },
+      "id": "if-ok",
+      "name": "IF: Test OK?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        0,
+        750
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ 'http://192.168.10.221:3030/api/download?path=' + encodeURIComponent($json.body.zip_file) }}",
+        "options": {},
+        "responseFormat": "file"
+      },
+      "id": "dl-zip",
+      "name": "Download Zip",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        200,
+        650
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "sendDocument",
+        "chatId": "={{ $('Format Data').first().json.chat_id }}",
+        "binaryData": true,
+        "file": "data",
+        "additionalFields": {
+          "caption": "={{ '\\u2705 *Tes Selesai!*\\n*Mode:* `' + $('Wait for Test').first().json.body.summary.test_type + '`\\n*Model:* `' + $('Wait for Test').first().json.body.summary.devices + '`\\n*Passed:* `' + $('Wait for Test').first().json.body.summary.passed + '`\\n*Failed:* `' + $('Wait for Test').first().json.body.summary.failed + '`\\n*Runtime:* `' + $('Wait for Test').first().json.body.summary.run_time + '`' }}",
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "send-result",
+      "name": "Send Result",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.1,
+      "position": [
+        400,
+        650
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "WgXKDS79dUDYK1c9",
+          "name": "Telegram Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "={{ 'http://192.168.10.221:3030/api/run-logs?result_dir=' + encodeURIComponent($('Wait for Test').first().json.body.result_dir) }}",
+        "options": {}
+      },
+      "id": "get-runlogs",
+      "name": "Get Run Logs",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        200,
+        850
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Format Data').first().json.chat_id }}",
+        "text": "={{ '\\u274c *Run Gagal (Exit ' + $('Wait for Test').first().json.body.exit_code + ')*\\n`' + $('Wait for Test').first().json.body.result_dir + '`\\n\\n```\\n' + ($json.logs||'No log').slice(-3500) + '\\n```' }}",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "send-error",
+      "name": "Send Error Alert",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.1,
+      "position": [
+        400,
+        850
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "WgXKDS79dUDYK1c9",
+          "name": "Telegram Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.action }}",
+              "operation": "equal",
+              "value2": "screenshot"
+            }
+          ]
+        }
+      },
+      "id": "if-ss",
+      "name": "IF: Is Screenshot?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        -400,
+        850
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.action }}",
+              "operation": "equal",
+              "value2": "zip_fetch"
+            }
+          ]
+        }
+      },
+      "id": "if-zip",
+      "name": "IF: Is Zip Fetch?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        -400,
+        775
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.action }}",
+              "operation": "equal",
+              "value2": "status"
+            }
+          ]
+        }
+      },
+      "id": "if-st",
+      "name": "IF: Is Status?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        -400,
+        1000
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.action }}",
+              "operation": "equal",
+              "value2": "log"
+            }
+          ]
+        }
+      },
+      "id": "if-lg",
+      "name": "IF: Is Log?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        -400,
+        1150
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.action }}",
+              "operation": "equal",
+              "value2": "log_fetch"
+            }
+          ]
+        }
+      },
+      "id": "if-lg-fetch",
+      "name": "IF: Is Log Fetch?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        -400,
+        1225
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.action }}",
+              "operation": "equal",
+              "value2": "cancel"
+            }
+          ]
+        }
+      },
+      "id": "if-ca",
+      "name": "IF: Is Cancel?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        -400,
+        1300
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.action }}",
+              "operation": "equal",
+              "value2": "menu"
+            }
+          ]
+        }
+      },
+      "id": "if-mn",
+      "name": "IF: Is Menu?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        -400,
+        1450
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.action }}",
+              "operation": "equal",
+              "value2": "diagnostics"
+            }
+          ]
+        }
+      },
+      "id": "if-diag",
+      "name": "IF: Is Diagnostics?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [
+        -400,
+        1525
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://api.telegram.org/bot8718749688:AAEYhrEul8UNdH-MEU9jJjLIOnuVjsGknW8/sendMessage",
+        "options": {},
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"chat_id\": $json.chat_id, \"text\": $json.pending_text, \"parse_mode\": \"Markdown\" } }}"
+      },
+      "id": "send-pend-ss",
+      "name": "Pending Screenshot",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -200,
+        850
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://api.telegram.org/bot8718749688:AAEYhrEul8UNdH-MEU9jJjLIOnuVjsGknW8/sendMessage",
+        "options": {},
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"chat_id\": $json.chat_id, \"text\": $json.pending_text } }}"
+      },
+      "id": "send-pend-zip",
+      "name": "Pending Zip",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -200,
+        775
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ 'http://192.168.10.221:3030/api/run-zip?run_id=' + encodeURIComponent($('Format Data').first().json.run_id) + '&zip_id=' + encodeURIComponent($('Format Data').first().json.zip_id) }}",
+        "options": {},
+        "responseFormat": "file"
+      },
+      "id": "get-zip",
+      "name": "Get Zip Result",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        0,
+        775
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "sendDocument",
+        "chatId": "={{ $('Format Data').first().json.chat_id }}",
+        "binaryData": true,
+        "file": "data",
+        "additionalFields": {
+          "caption": "Zip result runner"
+        }
+      },
+      "id": "send-zip",
+      "name": "Send Zip Result",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.1,
+      "position": [
+        200,
+        775
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "WgXKDS79dUDYK1c9",
+          "name": "Telegram Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://api.telegram.org/bot8718749688:AAEYhrEul8UNdH-MEU9jJjLIOnuVjsGknW8/sendMessage",
+        "options": {},
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"chat_id\": $json.chat_id, \"text\": $json.pending_text, \"parse_mode\": \"Markdown\" } }}"
+      },
+      "id": "send-pend-st",
+      "name": "Pending Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -200,
+        1000
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://api.telegram.org/bot8718749688:AAEYhrEul8UNdH-MEU9jJjLIOnuVjsGknW8/sendMessage",
+        "options": {},
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"chat_id\": $json.chat_id, \"text\": $json.pending_text, \"parse_mode\": \"Markdown\" } }}"
+      },
+      "id": "send-pend-lg",
+      "name": "Pending Log",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -200,
+        1150
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://api.telegram.org/bot8718749688:AAEYhrEul8UNdH-MEU9jJjLIOnuVjsGknW8/sendMessage",
+        "options": {},
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"chat_id\": $json.chat_id, \"text\": $json.pending_text, \"parse_mode\": \"Markdown\" } }}"
+      },
+      "id": "send-pend-lg-fetch",
+      "name": "Pending Log Fetch",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -200,
+        1225
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://api.telegram.org/bot8718749688:AAEYhrEul8UNdH-MEU9jJjLIOnuVjsGknW8/sendMessage",
+        "options": {},
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"chat_id\": $json.chat_id, \"text\": $json.pending_text } }}"
+      },
+      "id": "send-pend-diag",
+      "name": "Pending Diagnostics",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -200,
+        1525
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ 'http://192.168.10.221:3030/api/diagnostics?kind=' + encodeURIComponent($('Format Data').first().json.diagnostic_type) }}",
+        "options": {}
+      },
+      "id": "get-diag",
+      "name": "Get Diagnostics",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        0,
+        1600
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://api.telegram.org/bot8718749688:AAEYhrEul8UNdH-MEU9jJjLIOnuVjsGknW8/sendMessage",
+        "options": {},
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ (function() { const esc = value => String(value).replace(/&/g, \"&amp;\").replace(/</g, \"&lt;\").replace(/>/g, \"&gt;\"); const raw = String($json.result || \"Diagnostics kosong\").slice(-3800); const lines = raw.split(\"\\n\"); const titled = $json.kind !== \"tools\"; const title = titled ? (lines.shift() || \"Diagnostics\") : \"\"; return { \"chat_id\": $('Format Data').first().json.chat_id, \"text\": (titled ? \"<b>\" + esc(title) + \"</b>\\n\" : \"\") + \"<pre>\" + esc(lines.join(\"\\n\")) + \"</pre>\", \"parse_mode\": \"HTML\", \"reply_markup\": $('Format Data').first().json.main_menu }; })() }}"
+      },
+      "id": "send-diag",
+      "name": "Send Diagnostics",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        200,
+        1600
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://api.telegram.org/bot8718749688:AAEYhrEul8UNdH-MEU9jJjLIOnuVjsGknW8/sendMessage",
+        "options": {},
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"chat_id\": $json.chat_id, \"text\": $json.pending_text, \"parse_mode\": \"Markdown\" } }}"
+      },
+      "id": "send-pend-ca",
+      "name": "Pending Cancel",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -200,
+        1300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://api.telegram.org/bot8718749688:AAEYhrEul8UNdH-MEU9jJjLIOnuVjsGknW8/sendMessage",
+        "options": {},
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ $json.reply_markup ? { \"chat_id\": $json.chat_id, \"text\": $json.pending_text, \"parse_mode\": \"Markdown\", \"reply_markup\": $json.reply_markup } : { \"chat_id\": $json.chat_id, \"text\": $json.pending_text, \"parse_mode\": \"Markdown\" } }}"
+      },
+      "id": "send-menu",
+      "name": "Send Menu",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -200,
+        1400
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://api.telegram.org/bot8718749688:AAEYhrEul8UNdH-MEU9jJjLIOnuVjsGknW8/sendMessage",
+        "options": {},
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"chat_id\": $json.chat_id, \"text\": $json.pending_text, \"parse_mode\": \"Markdown\" } }}"
+      },
+      "id": "send-pend-rs",
+      "name": "Pending Reset",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -200,
+        1550
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ 'http://192.168.10.221:3030/api/screenshot?serial=' + $('Format Data').first().json.serial }}",
+        "options": {},
+        "responseFormat": "file"
+      },
+      "id": "get-ss",
+      "name": "Get Screenshot",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        0,
+        850
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "operation": "sendPhoto",
+        "chatId": "={{ $('Format Data').first().json.chat_id }}",
+        "binaryData": true,
+        "file": "data",
+        "additionalFields": {
+          "caption": "={{ '\\ud83d\\udcf8 Screenshot: `' + $('Format Data').first().json.serial + '`' }}",
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "send-ss",
+      "name": "Send Screenshot",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.1,
+      "position": [
+        200,
+        850
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "WgXKDS79dUDYK1c9",
+          "name": "Telegram Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "http://192.168.10.221:3030/api/status",
+        "options": {}
+      },
+      "id": "get-status",
+      "name": "Get Status",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        0,
+        1000
+      ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $('Format Data').first().json.chat_id }}",
+"text": "={{ (function() { const s = $json, st = s.status || 'IDLE'; const first = (s.running_devices || [])[0] || {}; const firstSuite = (Array.isArray(s.suites) ? s.suites[0] : null) || {}; const title = first.test_type || firstSuite.test_type || 'Status Runner'; const model = first.model || firstSuite.model || ''; let m = '\\ud83d\\udcca *' + title + (model ? ' Model ' + model : '') + ':* `' + st + '`\\n\\n'; if (st === 'RUNNING') { const devices = {}; (s.running_devices || []).forEach(d => { devices[d.serial] = d; }); const suites = Array.isArray(s.suites) ? s.suites : []; if (!suites.length) { m += '\\ud83d\\udca4 Detail suite belum tersedia.\\n'; } suites.forEach((suite, i) => { const ds = (suite.devices || []).map(serial => devices[serial]).filter(Boolean); const models = [...new Set(ds.map(d => d.model || 'Unknown'))].join(', ') || '-'; m += (i + 1) + '. *' + (suite.suite || '-') + ' | ' + models + '*\\n'; m += '   \\u2514 Status: `' + (suite.status || '-') + '` | Time: `' + (suite.elapsed_secs || 0) + 's`\\n'; m += '   \\u2514 Device: `' + ((suite.devices || []).join(', ') || '-') + '`\\n'; }); } else if (st === 'DONE' || st === 'FAILED') { m += '\\ud83d\\udca4 Tidak ada tes berjalan.\\n\\n'; const last = s.last_run || {}, sum = last.summary || {}; m += (st === 'DONE' ? '\\u2705' : '\\u274c') + ' *Tes Terakhir:*\\n'; m += '\\u2022 Tipe: `' + (last.test_type || '-') + '`\\n'; if (sum.total !== undefined) m += '\\u2022 ' + sum.passed + ' Passed / ' + sum.failed + ' Failed\\n'; m += '\\u2022 Folder: `' + (last.result_dir || '-') + '`\\n'; } else { m += '\\ud83d\\udca4 Tidak ada tes yang berjalan.'; } return m; })() }}",
+        "additionalFields": {
+          "parse_mode": "Markdown"
+        }
+      },
+      "id": "send-status",
+      "name": "Send Status",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.1,
+      "position": [
+        200,
+        1000
+      ],
+      "credentials": {
+        "telegramApi": {
+          "id": "WgXKDS79dUDYK1c9",
+          "name": "Telegram Bot"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "http://192.168.10.221:3030/api/status",
+        "options": {}
+      },
+      "id": "get-status-for-log",
+      "name": "Get Status for Log Menu",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        0,
+        1150
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://api.telegram.org/bot8718749688:AAEYhrEul8UNdH-MEU9jJjLIOnuVjsGknW8/sendMessage",
+        "options": {},
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ (function() {  const s = $json;  const options = Array.isArray(s.log_options) ? s.log_options : (s.body && Array.isArray(s.body.log_options) ? s.body.log_options : []);  const valid = options.filter(d => d && d.run_id);  const keyboard = valid.map(d => { const lines = String(d.title || d.run_id).split(\"\\n\"); const date = (lines[0].match(/^\\[(.*?)\\]/)||[])[1] || \"\"; const shortDate = date.replace(/(\\d{2})\\/(\\d{2})\\/\\d{2}(\\d{2}),\\s*(\\d{2}:\\d{2}):\\d{2}/, \"$1/$2/$3, $4\"); const test = (lines[0].split(\"] \")[1] || lines[0]).split(\" | \")[0]; const pda = (lines[1] || \"\").split(\" [\")[0]; return ([{ text: \"[\" + shortDate + \"] \" + test + \" | \" + pda, callback_data: \"log_run_\" + d.run_id }]); });  if (!keyboard.length) {    return { \"chat_id\": $('Format Data').first().json.chat_id, \"text\": \"\\u26a0\\ufe0f Belum ada folder hasil terbuat.\", \"parse_mode\": \"Markdown\" };  }  return { \"chat_id\": $('Format Data').first().json.chat_id, \"text\": \"\\ud83d\\udccb Pilih log tes mana yang ingin dilihat:\", \"parse_mode\": \"Markdown\", \"reply_markup\": { \"inline_keyboard\": keyboard } }; })() }}"
+      },
+      "id": "send-log-menu",
+      "name": "Send Log Menu",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        200,
+        1150
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ 'http://192.168.10.221:3030/api/run-logs?run_id=' + encodeURIComponent($('Format Data').first().json.run_id) + '&suite=RUNNER' }}",
+        "options": {}
+      },
+      "id": "get-runlogs",
+      "name": "Get Specific Run Logs",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        0,
+        1225
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://api.telegram.org/bot8718749688:AAEYhrEul8UNdH-MEU9jJjLIOnuVjsGknW8/sendMessage",
+        "options": {},
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ (function() { const esc = value => String(value).replace(/&/g, \"&amp;\").replace(/</g, \"&lt;\").replace(/>/g, \"&gt;\"); const log = String($json.logs || \"Kosong\").slice(-3500); const zips = ($json.zip_options || []).map(z => ([{ text: \"ZIP \" + z.title, callback_data: \"zip_\" + $('Format Data').first().json.run_id + \"|\" + z.id }])); return { \"chat_id\": $('Format Data').first().json.chat_id, \"text\": \"<blockquote>\" + esc(log) + \"</blockquote>\", \"parse_mode\": \"HTML\", \"reply_markup\": { \"inline_keyboard\": zips.concat($('Format Data').first().json.main_menu.inline_keyboard) } }; })() }}"
+      },
+      "id": "send-runlogs",
+      "name": "Send Specific Logs",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        200,
+        1225
+      ]
+    },
+    {
+      "parameters": {
+        "url": "http://192.168.10.221:3030/api/cancel-run",
+        "options": {},
+        "method": "POST"
+      },
+      "id": "call-cancel",
+      "name": "Call Cancel",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        0,
+        1300
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "url": "https://api.telegram.org/bot8718749688:AAEYhrEul8UNdH-MEU9jJjLIOnuVjsGknW8/sendMessage",
+        "options": {},
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"chat_id\": $('Format Data').first().json.chat_id, \"text\": \"\\u2705 Tes berhasil dibatalkan!\", \"parse_mode\": \"Markdown\", \"reply_markup\": $('Format Data').first().json.main_menu } }}"
+      },
+      "id": "send-cancel",
+      "name": "Send Cancel Done",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        200,
+        1300
+      ]
+    },
+    {
+      "parameters": {
+        "url": "http://192.168.10.221:3030/api/reset-busy-state",
+        "options": {},
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"auto_root\": \"/run/media/endri-pro/BINARY_HDD/AUTO\" } }}"
+      },
+      "id": "call-reset",
+      "name": "Call Reset",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        0,
+        1550
+      ],
+      "continueOnFail": true
+    },
+    {
+      "parameters": {
+        "url": "https://api.telegram.org/bot8718749688:AAEYhrEul8UNdH-MEU9jJjLIOnuVjsGknW8/sendMessage",
+        "options": {},
+        "method": "POST",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"chat_id\": $('Format Data').first().json.chat_id, \"text\": \"\\u2705 Status perangkat direset!\", \"parse_mode\": \"Markdown\", \"reply_markup\": $('Format Data').first().json.main_menu } }}"
+      },
+      "id": "send-reset",
+      "name": "Send Reset Done",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        200,
+        1550
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Telegram Trigger": {
+      "main": [
+        [
+          {
+            "node": "Ensure Runner",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ensure Runner": {
+      "main": [
+        [
+          {
+            "node": "Get Devices",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Devices": {
+      "main": [
+        [
+          {
+            "node": "Format Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Data": {
+      "main": [
+        [
+          {
+            "node": "Answer Callback",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "IF: Is Run?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Answer Callback": {
+      "main": []
+    },
+    "IF: Is Run?": {
+      "main": [
+        [
+          {
+            "node": "Send Run Message",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "IF: Is Zip Fetch?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF: Is Zip Fetch?": {
+      "main": [
+        [
+          {
+            "node": "Pending Zip",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "IF: Is Screenshot?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Run Message": {
+      "main": [
+        [
+          {
+            "node": "Start Test Suite",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Start Test Suite": {
+      "main": [
+        [
+          {
+            "node": "Wait for Test",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Wait for Test": {
+      "main": [
+        [
+          {
+            "node": "IF: Test OK?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF: Test OK?": {
+      "main": [
+        [
+          {
+            "node": "Download Zip",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Get Run Logs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Download Zip": {
+      "main": [
+        [
+          {
+            "node": "Send Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Run Logs": {
+      "main": [
+        [
+          {
+            "node": "Send Error Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF: Is Screenshot?": {
+      "main": [
+        [
+          {
+            "node": "Pending Screenshot",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "IF: Is Status?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF: Is Status?": {
+      "main": [
+        [
+          {
+            "node": "Pending Status",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "IF: Is Log?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF: Is Log?": {
+      "main": [
+        [
+          {
+            "node": "Pending Log",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "IF: Is Log Fetch?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF: Is Log Fetch?": {
+      "main": [
+        [
+          {
+            "node": "Pending Log Fetch",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "IF: Is Cancel?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF: Is Cancel?": {
+      "main": [
+        [
+          {
+            "node": "Pending Cancel",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "IF: Is Menu?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF: Is Menu?": {
+      "main": [
+        [
+          {
+            "node": "Send Menu",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "IF: Is Diagnostics?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "IF: Is Diagnostics?": {
+      "main": [
+        [
+          {
+            "node": "Pending Diagnostics",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Pending Reset",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pending Screenshot": {
+      "main": [
+        [
+          {
+            "node": "Get Screenshot",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pending Zip": {
+      "main": [
+        [
+          {
+            "node": "Get Zip Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Zip Result": {
+      "main": [
+        [
+          {
+            "node": "Send Zip Result",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pending Status": {
+      "main": [
+        [
+          {
+            "node": "Get Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pending Log": {
+      "main": [
+        [
+          {
+            "node": "Get Status for Log Menu",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Status for Log Menu": {
+      "main": [
+        [
+          {
+            "node": "Send Log Menu",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pending Diagnostics": {
+      "main": [
+        [
+          {
+            "node": "Get Diagnostics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Diagnostics": {
+      "main": [
+        [
+          {
+            "node": "Send Diagnostics",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pending Log Fetch": {
+      "main": [
+        [
+          {
+            "node": "Get Specific Run Logs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Specific Run Logs": {
+      "main": [
+        [
+          {
+            "node": "Send Specific Logs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Pending Cancel": {
+      "main": [
+        [
+          {
+            "node": "Call Cancel",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Menu": {
+      "main": []
+    },
+    "Pending Reset": {
+      "main": [
+        [
+          {
+            "node": "Call Reset",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Screenshot": {
+      "main": [
+        [
+          {
+            "node": "Send Screenshot",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Get Status": {
+      "main": [
+        [
+          {
+            "node": "Send Status",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Cancel": {
+      "main": [
+        [
+          {
+            "node": "Send Cancel Done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Call Reset": {
+      "main": [
+        [
+          {
+            "node": "Send Reset Done",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true
+  },
+  "versionId": "c3d4e5f6-a7b8-9012-cdef-345678901234",
+  "meta": {
+    "templateCredsSetupCompleted": true
+  },
+  "nodeGroups": [],
+  "id": "GBABotRobust2",
+  "tags": []
+}

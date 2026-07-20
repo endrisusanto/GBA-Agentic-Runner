@@ -14,12 +14,23 @@ src-tauri/target/release/bundle/
 
 # Local runtime state
 .gba-agentic-latest-result
+.gba-agentic-last-status
+.gba-agentic-results/
+.gba-workspaces/
+busy.json
+install-update.sh
 *.log
 graphify-out/
 __pycache__/
 *.pyc
 test_*.py
 *_test.py
+/fix*.py
+/patch*.py
+/update*.py
+/gen*.py
+/generate_json.py
+/test*
 
 # Android suite payloads and generated test results
 CTS/
