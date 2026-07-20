@@ -72,6 +72,7 @@ const state = {
   activeRuns: new Set(),
   runDevices: new Map(),
   localBusy: new Map(),
+  completedDevices: new Set(),
   flows: new Map(),
   logFlows: new Map(),
   activeLogFlow: "",
@@ -84,6 +85,7 @@ const state = {
   runTableTab: "preview",
   laundryWarnings: [],
   preflightLines: [],
+  manualSelection: false,
 };
 
 const app = document.querySelector("#app");
@@ -111,7 +113,7 @@ app.innerHTML = `
         <h2>DEVICES</h2>
         <div class="pane-actions">
           <button class="mini-button warn" id="resetBusyBtn">Reset Busy</button>
-          <button class="mini-button" id="unselectBtn">Unselect</button>
+          <button class="mini-button" id="unselectBtn">Select All</button>
           <button class="mini-button" id="refreshBtn">Refresh</button>
         </div>
       </div>
@@ -122,7 +124,7 @@ app.innerHTML = `
     <main class="workspace">
       <div class="toolbar">
         <button class="run-button" id="runBtn">Run Selected</button>
-        <button class="ghost-button" id="cancelBtn" disabled>Cancel</button>
+        <button class="ghost-button emergency-button" id="cancelBtn" disabled>Emergency Stop</button>
         <button class="ghost-button" id="openResultBtn" disabled>Open Result</button>
         <button class="ghost-button" id="preflightToolbarBtn">Preflight</button>
         <div class="toolbar-spacer"></div>
@@ -206,7 +208,7 @@ app.innerHTML = `
         <header>
           <div>
             <h2 id="settingsTitle">SETTINGS</h2>
-            <p>AUTO root path, Wi-Fi preset, and preflight check</p>
+            <p>AUTO root path and preflight check</p>
           </div>
           <button class="icon-button" id="settingsCloseBtn" title="Close">×</button>
         </header>
@@ -378,17 +380,24 @@ listen("gba-run-started", async (event) => {
   const payload = event.payload || {};
   const runId = payload.run_id;
   const runMode = payload.test_type;
-  const serials = payload.selected_devices || [];
+  const serials = [...(payload.selected_devices || []), ...(payload.userdebug_devices || [])];
   
   if (!state.activeRuns.has(runId)) {
     state.activeRuns.add(runId);
     state.runDevices.set(runId, serials);
-    state.flows.set(runId, {
+    serials.forEach((serial) => state.completedDevices.delete(serial));
+        state.flows.set(runId, {
       mode: runMode,
       flow: runMode,
       devices: serials.join(","),
-      model: "Unknown",
+      model: payload.model || "Unknown",
     });
+    
+    // Add missing createRunLogFlow for external runs
+    if (!state.logFlows.has(runId)) {
+      const deviceObjects = serials.map(serial => state.devices.find(d => d.serial === serial) || { serial });
+      createRunLogFlow(runId, runMode, deviceObjects);
+    }
     
     // Add to selected devices so they are checked (selected)
     serials.forEach((serial) => {
@@ -403,7 +412,14 @@ listen("gba-run-started", async (event) => {
   await refreshDevices();
 });
 
-listen("gba-run-log", (event) => appendLog(String(event.payload || "")));
+listen("gba-run-log", (event) => {
+  const payload = event.payload;
+  if (payload && typeof payload === 'object' && payload.line !== undefined) {
+    appendLog(payload.line, payload.run_id);
+  } else {
+    appendLog(String(payload || ""));
+  }
+});
 listen("gba-suite-status", (event) => {
   const payload = event.payload || {};
   ensureFlow(payload.run_id, payload.test_type, payload.devices);
@@ -438,6 +454,7 @@ listen("gba-run-finished", (event) => {
     const finishedSerials = state.runDevices.get(payload.run_id) || [];
     finishedSerials.forEach((serial) => {
       state.selected.delete(serial);
+      state.completedDevices.add(serial);
     });
     state.activeRuns.delete(payload.run_id);
     clearLocalBusy(finishedSerials);
@@ -510,8 +527,27 @@ async function refreshDevices() {
     showInfoModal("ADB Refresh Failed", "Device scan failed.", [String(error)], "error");
     state.devices = [];
   }
+  if (!state.selected.size) selectLaundryModelFromResults();
   renderDevices();
   els.deviceFooter.textContent = `${state.devices.length} detected`;
+  
+  // Dynamically update log flow titles if they have NO_MODEL
+  state.logFlows.forEach((flow, runId) => {
+    if (flow.title.includes("NO_MODEL") || flow.title.includes("NO_PDA")) {
+      const runDevices = state.runDevices.get(runId) || [];
+      if (runDevices.length > 0) {
+        const deviceObjects = runDevices.map(serial => state.devices.find(d => d.serial === serial) || { serial });
+        const primary = deviceObjects[0] || {};
+        if (primary.model) {
+          const serialsStr = runDevices.join(",");
+          const deviceTitle = `${primary.model || "NO_MODEL"} | ${primary.pda || "NO_PDA"} [${serialsStr}]`;
+          flow.title = `${flow.mode || "Run"} | ${deviceTitle}`;
+        }
+      }
+    }
+  });
+  if (state.activeLogFlow) renderLogTabs();
+  renderSuiteStatus();
 }
 
 function applyLocalBusyOverlay(devices) {
@@ -539,7 +575,8 @@ function render() {
 
 function renderDevices() {
   const readyDevices = state.devices.filter((device) => device.state === "device" && !device.busy);
-  els.unselectBtn.textContent = state.selected.size === readyDevices.length && readyDevices.length ? "Unselect" : "Select";
+  const allReadySelected = readyDevices.length > 0 && readyDevices.every((device) => state.selected.has(device.serial));
+  els.unselectBtn.textContent = allReadySelected ? "Deselect All" : "Select All";
 
   if (!state.devices.length) {
     els.deviceList.innerHTML = `<div class="empty">No ADB devices detected.</div>`;
@@ -547,12 +584,31 @@ function renderDevices() {
     return;
   }
 
-  els.deviceList.innerHTML = state.devices.map((device) => {
+  const devicesByModel = new Map();
+  [...state.devices]
+    .sort((a, b) => {
+      const status = (device) => Number(Boolean(device.busy || device.busy_reason)) + Number(state.completedDevices.has(device.serial));
+      return modelKey(a).localeCompare(modelKey(b)) || status(a) - status(b) || String(a.serial).localeCompare(String(b.serial));
+    })
+    .forEach((device) => {
+      const model = device.model || "UNKNOWN_MODEL";
+      if (!devicesByModel.has(model)) devicesByModel.set(model, []);
+      devicesByModel.get(model).push(device);
+    });
+
+  els.deviceList.innerHTML = [...devicesByModel.entries()].map(([model, devices], groupIndex) => `
+    <section class="model-group model-group-${groupIndex % 5}">
+      <header class="model-group-header">
+        <strong>${escapeHtml(model)}</strong>
+        <span>${devices.length} device${devices.length === 1 ? "" : "s"}</span>
+      </header>
+      ${devices.map((device) => {
     const isBusy = Boolean(device.busy || device.busy_reason);
     const ready = device.state === "device" && !isBusy;
     const selected = state.selected.has(device.serial);
     const badge = isBusy ? "BUSY" : (device.is_userdebug ? "USERDEBUG" : "USER");
     const lampActive = state.lampStates.get(device.serial);
+    const completed = state.completedDevices.has(device.serial) && !isBusy;
     return `
       <article class="device-card ${selected ? "selected" : ""} ${ready ? "" : "disabled"} ${isBusy ? "busy" : ""}" data-serial="${escapeHtml(device.serial)}" role="button" tabindex="${ready ? "0" : "-1"}">
         <div class="device-top">
@@ -579,8 +635,11 @@ function renderDevices() {
           <span><small>CSC</small>${escapeHtml(device.csc || device.sales_code || "-")}</span>
         </div>
       </article>
+      ${completed ? '<div class="device-completed-badge">TEST COMPLETED</div>' : ""}
     `;
-  }).join("");
+      }).join("")}
+    </section>
+  `).join("");
 
   els.deviceList.querySelectorAll(".device-card").forEach((card) => {
     card.addEventListener("click", () => {
@@ -588,6 +647,7 @@ function renderDevices() {
       const serial = card.dataset.serial;
       if (state.selected.has(serial)) state.selected.delete(serial);
       else state.selected.add(serial);
+      state.manualSelection = true;
       render();
     });
     card.addEventListener("keydown", (event) => {
@@ -682,7 +742,10 @@ function renderLog() {
   const flow = state.logFlows.get(state.activeLogFlow);
   const tab = flow?.tabs?.get(state.activeLogSubtab);
   els.logBox.textContent = (tab?.lines || []).slice(-600).join("\n");
-  els.logBox.scrollTop = els.logBox.scrollHeight;
+  // ponytail: do not auto-scroll if user is hovering to read
+  if (!els.logBox.matches(":hover")) {
+    els.logBox.scrollTop = els.logBox.scrollHeight;
+  }
 }
 
 function renderLogTabs() {
@@ -692,7 +755,7 @@ function renderLogTabs() {
   els.logFlowTabs.innerHTML = [...state.logFlows.values()].map((flow) => `
     <span class="log-tab-wrap ${flow.id === state.activeLogFlow ? "active" : ""}">
       <button class="log-tab" data-flow="${escapeHtml(flow.id)}" title="${escapeHtml(flow.title)}">${escapeHtml(flow.title)}</button>
-      <button class="log-tab-close" data-close-log="${escapeHtml(flow.id)}" ${flow.id === "boot" || state.activeRuns.has(flow.id) ? "disabled" : ""} title="Close">×</button>
+      <button class="log-tab-close" data-close-log="${escapeHtml(flow.id)}" ${flow.id === "boot" ? "disabled" : ""} title="${state.activeRuns.has(flow.id) ? "Emergency stop and close" : "Close"}">×</button>
     </span>
   `).join("");
   els.logFlowTabs.querySelectorAll(".log-tab").forEach((button) => {
@@ -902,7 +965,8 @@ function renderFlowMap() {
   els.flowMap.querySelectorAll(".run-tab-btn").forEach((btn) => {
     btn.addEventListener("click", () => {
       state.runTableTab = btn.dataset.tab;
-      renderFlowMap();
+      if (state.runTableTab === "preview" && !state.manualSelection) selectLaundryModelFromResults();
+      render();
     });
   });
 
@@ -1080,7 +1144,7 @@ function renderSuiteStatus() {
       const failed = summary?.failed ?? "-";
       const passed = summary?.passed ?? "-";
       return `
-        <div class="suite-row">
+        <div class="suite-row status-row-${statusClass(status.status)}">
           <div>
             <strong>${escapeHtml(status.suite || "-")}</strong>
             <p>${escapeHtml(status.devices || "-")}</p>
@@ -1111,7 +1175,7 @@ function renderSuiteStatus() {
               <span class="flow-suite-count" style="color: ${pct === 1 ? 'var(--green)' : 'var(--cyan)'}">${completedSuites}/${sortedStatuses.length} suite (${testedTestcases}/${totalTestcases} testcases)</span>
             </div>
           </div>
-          <button class="flow-close" data-close-suite="${escapeHtml(runId)}" ${activeRun ? "disabled" : ""} title="${activeRun ? "Run still active" : "Close"}">×</button>
+      <button class="flow-close" data-close-suite="${escapeHtml(runId)}" title="${activeRun ? "Emergency stop and close" : "Close"}">×</button>
         </header>
         <div class="flow-suite-list">${rows}</div>
       </div>
@@ -1119,7 +1183,7 @@ function renderSuiteStatus() {
   }).join("");
 
   els.suiteList.querySelectorAll("[data-close-suite]").forEach((button) => {
-    button.addEventListener("click", () => closeSuiteRun(button.dataset.closeSuite));
+      button.addEventListener("click", () => closeSuiteRun(button.dataset.closeSuite));
   });
 }
 
@@ -1183,7 +1247,7 @@ function ensureFlow(runId, testType, devices) {
 
 function getDeviceModelsForFlow(flow) {
   if (!flow) return "Unknown";
-  if (flow.model) return flow.model;
+  if (flow.model && flow.model !== "Unknown") return flow.model;
   if (!flow.devices) return "Unknown";
   const serials = flow.devices.split(",").filter(Boolean);
   const models = serials.map(serial => {
@@ -1196,14 +1260,13 @@ function getDeviceModelsForFlow(flow) {
 
 function toggleAllReadyDevices() {
   const readyDevices = state.devices.filter((device) => device.state === "device" && !device.busy);
-  const selectedDevices = readyDevices.filter((device) => state.selected.has(device.serial));
-  if (readyDevices.length && state.selected.size === readyDevices.length) {
+  const allReadySelected = readyDevices.length > 0 && readyDevices.every((device) => state.selected.has(device.serial));
+  if (allReadySelected) {
     state.selected.clear();
-  } else if (selectedDevices.length) {
-    selectReadyModel(modelKey(selectedDevices[0]));
+    state.manualSelection = true;
   } else {
-    const hinted = selectLaundryModelFromResults();
-    if (!hinted) state.selected = new Set(readyDevices.map((device) => device.serial));
+    state.selected = new Set(readyDevices.map((device) => device.serial));
+    state.manualSelection = true;
   }
   render();
 }
@@ -1338,6 +1401,7 @@ async function chooseLaundryZip() {
     state.laundryResults = [];
     state.selectedLaundryResults = new Set();
     state.laundryWarnings = [];
+    state.manualSelection = false;
     appendLog(`[runner] Laundry zip selected: ${path}`);
     renderFlowMap();
     try {
@@ -1430,6 +1494,7 @@ async function runSelected() {
   state.runTableTab = "running";
   markLocalBusy(runnableDevices, runMode);
   state.selected.clear();
+  state.manualSelection = false;
   els.cancelBtn.disabled = false;
   els.openResultBtn.disabled = true;
   els.resultPill.disabled = true;
@@ -1551,18 +1616,29 @@ function clearLocalBusy(serials) {
   renderDevices();
 }
 
-async function cancelRun() {
-  appendLog("[runner] Cancel requested.");
+async function emergencyStop(reason = "Emergency stop") {
+  appendLog(`[runner] ${reason}: stopping all test processes.`);
   els.cancelBtn.disabled = true;
-  els.statusLine.textContent = "Cancelling";
+  els.statusLine.textContent = "Emergency stop";
   try {
-    await invoke("cancel_run");
+    await invoke("cancel_run", { runId: null });
+    await invoke("reset_busy_state", { autoRoot: state.autoRoot || null });
+    state.activeRuns.clear();
+    state.runDevices.clear();
+    state.localBusy.clear();
+    state.completedDevices.clear();
+    state.selected.clear();
+    state.running = false;
     await refreshDevices();
   } catch (error) {
-    appendLog(`[runner] Cancel failed: ${error}`);
+    appendLog(`[runner] Emergency stop failed: ${error}`);
     showInfoModal("Cancel Failed", "Runner could not cancel the active process.", [String(error)], "error");
-    els.cancelBtn.disabled = false;
+    els.cancelBtn.disabled = state.activeRuns.size === 0;
   }
+}
+
+async function cancelRun() {
+  await emergencyStop("Emergency stop requested");
 }
 
 async function resetBusyState() {
@@ -1571,6 +1647,7 @@ async function resetBusyState() {
     await invoke("reset_busy_state", { autoRoot: state.autoRoot || null });
     state.selected.clear();
     state.localBusy.clear();
+    state.completedDevices.clear();
     state.runDevices.clear();
     appendLog("[runner] busy.json reset.");
     await refreshDevices();
@@ -1683,6 +1760,10 @@ function validateRun(mode, userDevices, userdebugDevices) {
     const laundryValidation = validateLaundrySmrSelection();
     if (laundryValidation) return laundryValidation;
   }
+  if (isLaundryMode(mode.id)) {
+    const modelValidation = validateLaundryModelSelection();
+    if (modelValidation) return modelValidation;
+  }
   if (mode.needs === "both" && userDevices.length === 0 && userdebugDevices.length === 0) return `${mode.name} needs at least one runnable device.`;
   if (!state.autoRoot) return "AUTO root is empty. Open settings and save root.";
   return "";
@@ -1692,9 +1773,18 @@ function selectLaundryModelFromResults() {
   if (!isLaundryMode(state.selectedMode) || !state.devices.length) return false;
   const readyDevices = state.devices.filter((device) => device.state === "device" && !device.busy);
   const selectedRows = state.laundryResults.filter((row) => !state.selectedLaundryResults.size || state.selectedLaundryResults.has(row.id));
-  const hint = `${state.laundryZipPath} ${selectedRows.map((row) => `${row.id} ${row.testcase} ${row.result_dir}`).join(" ")}`.toUpperCase();
-  const hintedModel = readyDevices.map(modelKey).find((model) => model !== "UNKNOWN_MODEL" && hint.includes(model));
-  if (hintedModel) return selectReadyModel(hintedModel);
+  if (!selectedRows.length || state.selected.size) return false;
+  const hintedModels = laundryPreviewModels(selectedRows, readyDevices);
+  if (hintedModels.length) {
+    const serials = readyDevices
+      .filter((device) => hintedModels.includes(modelKey(device)))
+      .map((device) => device.serial);
+    if (serials.length) {
+      state.selected = new Set(serials);
+      appendLog(`[runner] Auto-selected ${serials.length} device(s) from Preview model(s): ${hintedModels.join(", ")}.`);
+      return true;
+    }
+  }
 
   const needs = laundryNeeds(selectedRows);
   const fallback = readyDevices.find((device) => {
@@ -1704,6 +1794,43 @@ function selectLaundryModelFromResults() {
     return true;
   });
   return fallback ? selectReadyModel(modelKey(fallback)) : false;
+}
+
+function laundryPreviewHint(rows) {
+  return `${state.laundryZipPath} ${rows.map((row) => [
+    row.id,
+    row.model,
+    row.device_model,
+    row.deviceModel,
+    row.testcase,
+    row.result_dir,
+  ].filter(Boolean).join(" ")).join(" ")}`.toUpperCase();
+}
+
+function modelMatchesPreview(model, hint) {
+  const normalized = modelKey({ model });
+  const tokens = [normalized, normalized.replace(/^SM-/, "")];
+  return tokens.some((token) => token.length > 3 && hint.includes(token));
+}
+
+function laundryPreviewModels(rows, devices = state.devices) {
+  const hint = laundryPreviewHint(rows);
+  return [...new Set(devices.map(modelKey))]
+    .filter((model) => model !== "UNKNOWN_MODEL" && modelMatchesPreview(model, hint));
+}
+
+function validateLaundryModelSelection() {
+  if (!state.laundryResults.length || !state.selected.size) return "";
+  const rows = state.laundryResults.filter((row) => !state.selectedLaundryResults.size || state.selectedLaundryResults.has(row.id));
+  const previewModels = laundryPreviewModels(rows);
+  if (!previewModels.length) return "";
+  const selectedModels = [...new Set(
+    state.devices.filter((device) => state.selected.has(device.serial)).map(modelKey),
+  )];
+  const mismatch = selectedModels.filter((model) => !previewModels.includes(model));
+  return mismatch.length
+    ? `Selected model ${mismatch.join(", ")} does not match Preview model ${previewModels.join(", ")}.`
+    : "";
 }
 
 function selectReadyModel(model) {
@@ -1759,12 +1886,20 @@ function validateLaundrySmrSelection() {
   return "";
 }
 
-function appendLog(line) {
+function appendLog(line, runId = null) {
   const text = redact(String(line || ""));
   const stamp = new Date().toLocaleTimeString("en-GB", { hour12: false });
   const kind = logKind(text);
-  const flow = latestLogFlowForKind(kind) || createBootLogFlow();
-  const tab = ensureLogSubtab(flow.id, kind);
+  
+  let flow;
+  if (runId && state.logFlows.has(runId)) {
+    flow = state.logFlows.get(runId);
+  } else {
+    flow = latestLogFlowForKind(kind) || createBootLogFlow();
+  }
+  
+  if (!flow.tabs.has(kind)) flow.tabs.set(kind, { kind, lines: [] });
+  const tab = flow.tabs.get(kind);
   tab.lines.push(`${stamp} ${text}`);
   renderLog();
 }
@@ -1813,8 +1948,9 @@ function clearInactiveLogTabs() {
   }
 }
 
-function closeLogFlow(flowId) {
-  if (!flowId || flowId === "boot" || state.activeRuns.has(flowId)) return;
+async function closeLogFlow(flowId) {
+  if (!flowId || flowId === "boot") return;
+  if (state.activeRuns.has(flowId)) await emergencyStop(`Closing runner tab ${flowId}`);
   state.logFlows.delete(flowId);
   if (state.activeLogFlow === flowId) {
     state.activeLogFlow = [...state.logFlows.keys()][0] || "";
@@ -1874,8 +2010,9 @@ function clearInactiveSuites() {
   renderMetrics();
 }
 
-function closeSuiteRun(runId) {
-  if (!runId || state.activeRuns.has(runId)) return;
+async function closeSuiteRun(runId) {
+  if (!runId) return;
+  if (state.activeRuns.has(runId)) await emergencyStop(`Closing suite ${runId}`);
   for (const [key, status] of [...state.suiteStatuses.entries()]) {
     if ((status.run_id || "legacy") === runId) state.suiteStatuses.delete(key);
   }

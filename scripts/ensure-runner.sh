@@ -17,10 +17,9 @@ export WAYLAND_DISPLAY="${WAYLAND_DISPLAY:-wayland-0}"
 export WEBKIT_DISABLE_DMABUF_RENDERER=1
 export WEBKIT_DISABLE_COMPOSITING_MODE=1
 
-# Start the runner via npm run dev in workspace
-echo "Starting via npm run dev in workspace..."
-cd /run/media/endri-pro/BINARY_HDD/AUTO
-nohup npm run dev >/tmp/gba-agentic-runner-n8n.log 2>&1 & disown
+# Start the runner via installed binary
+echo "Starting via installed binary..."
+nohup /usr/bin/gba-agentic-runner >/tmp/gba-agentic-runner-n8n.log 2>&1 & disown
 
 # Wait up to 15 seconds for port 3030 to open (vite + cargo build might take a few seconds)
 for i in {1..30}; do

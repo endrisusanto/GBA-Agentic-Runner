@@ -1,9 +1,10 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::{hash_map::DefaultHasher, HashMap, HashSet};
 use std::env;
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
+use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -36,6 +37,7 @@ struct DeviceInfo {
     fingerprint: String,
     security_patch: String,
     android: String,
+    sdk: String,
     sales_code: String,
     model: String,
     pda: String,
@@ -44,6 +46,8 @@ struct DeviceInfo {
     ip: String,
     busy: bool,
     busy_reason: String,
+    run_id: Option<String>,
+    result_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -68,12 +72,6 @@ struct ApiRunRequest {
     #[serde(flatten)]
     suite_request: RunSuiteRequest,
     webhook_url: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-struct ApiRunResponse {
-    status: String,
-    run_id: String,
 }
 
 #[derive(Clone)]
@@ -178,11 +176,15 @@ struct BusyRegistry {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct BusyDevice {
     serial: String,
+    #[serde(default)]
+    is_userdebug: bool,
     test_type: String,
     model: String,
     pda: String,
     run_id: String,
     started_at: String,
+    result_dir: Option<String>,
+    current_suite: Option<String>,
 }
 
 #[derive(Default)]
@@ -190,10 +192,18 @@ struct RunState {
     active: Mutex<ActiveRun>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+struct LogFlowOption {
+    id: String,
+    title: String,
+    run_id: String,
+    result_dir: Option<String>,
+}
+
 #[derive(Default)]
 struct ActiveRun {
     running: bool,
-    pids: Vec<u32>,
+    pids: Vec<(String, u32)>,
     root: Option<PathBuf>,
     busy_serials: Vec<String>,
     log_file: Option<PathBuf>,
@@ -303,6 +313,7 @@ fn list_devices() -> Result<Vec<DeviceInfo>, String> {
             fingerprint,
             security_patch: prop(&props, "ro.build.version.security_patch"),
             android: prop(&props, "ro.build.version.release"),
+            sdk: prop(&props, "ro.product.build.version.sdk"),
             sales_code: prop(&props, "ro.csc.sales_code"),
             model: first_non_empty(&[
                 prop(&props, "ro.product.model"),
@@ -316,6 +327,8 @@ fn list_devices() -> Result<Vec<DeviceInfo>, String> {
             busy_reason: busy_entry
                 .map(|entry| format!("{} {}", entry.test_type, entry.started_at))
                 .unwrap_or_default(),
+            run_id: busy_entry.map(|entry| entry.run_id.clone()),
+            result_dir: busy_entry.and_then(|entry| entry.result_dir.clone()),
         });
     }
 
@@ -531,7 +544,9 @@ async fn start_api_server(app_handle: AppHandle) {
         .route("/api/check-laundry-mismatches", post(api_check_laundry_mismatches))
         .route("/api/logs", get(api_get_logs))
         .route("/api/run-logs", get(api_get_run_logs))
+        .route("/api/run-zip", get(api_get_run_zip))
         .route("/api/status", get(api_get_status))
+        .route("/api/diagnostics", get(api_diagnostics))
         .route("/api/download", get(api_download_file))
         .route("/api/screenshot", get(api_screenshot))
         .with_state(state);
@@ -683,12 +698,78 @@ async fn api_preflight(
     }
 }
 
+#[derive(Deserialize)]
+struct DiagnosticsParams {
+    kind: String,
+}
+
+async fn api_diagnostics(
+    Query(params): Query<DiagnosticsParams>,
+) -> axum::response::Json<serde_json::Value> {
+    let result = match params.kind.as_str() {
+        "resource" => Command::new("sh")
+            .args(["-c", "mem=$(free -h | awk 'NR==2 {print $3 \" / \" $2}'); disk=$(df -h / | awk 'NR==2 {print $3 \" / \" $2 \" (\" $5 \")\"}'); load=$(uptime | sed 's/.*load average: //'); printf '📊 PC RESOURCE\\n\\n%-14s │ %s\\n%-14s │ %s\\n%-14s │ %s\\n' 'Memory' \"$mem\" 'Disk /' \"$disk\" 'Load Average' \"$load\""])
+            .output()
+            .map(|output| String::from_utf8_lossy(&output.stdout).to_string())
+            .unwrap_or_else(|err| format!("PC resource failed: {err}")),
+        "speed" => Command::new("sh")
+            .args(["-c", "download=$(curl -L -sS -o /dev/null -w '%{speed_download}' --max-time 15 'https://speed.cloudflare.com/__down?bytes=10000000'); upload=$(head -c 10000000 /dev/zero | curl -L -sS -X POST --data-binary @- -o /dev/null -w '%{speed_upload}' --max-time 15 'https://speed.cloudflare.com/__up'); awk -v d=\"$download\" -v u=\"$upload\" 'BEGIN {printf \"🌐 INTERNET SPEED\\n\\nDownload │ %.2f MB/s\\nUpload   │ %.2f MB/s\\n\", d*8/1000000, u*8/1000000}'"])
+            .output()
+            .map(|output| String::from_utf8_lossy(&output.stdout).to_string())
+            .unwrap_or_else(|err| format!("Internet speed failed: {err}")),
+        "tools" => tools_version_table(),
+        _ => "Unknown diagnostics action".to_string(),
+    };
+    axum::response::Json(serde_json::json!({ "kind": params.kind, "result": result }))
+}
+
+fn tools_version_table() -> String {
+    let root = match resolve_auto_root(None) {
+        Ok(root) => root,
+        Err(err) => return format!("Tools version failed: {err}"),
+    };
+    let mut rows = Vec::new();
+    for entry in WalkDir::new(&root).into_iter().flatten() {
+        if !entry.file_type().is_file() || !entry.file_name().to_string_lossy().ends_with("-tradefed.jar") {
+            continue;
+        }
+        let Ok(file) = File::open(entry.path()) else { continue };
+        let Ok(mut jar) = ZipArchive::new(file) else { continue };
+        let Ok(mut info) = jar.by_name("test-suite-info.properties") else { continue };
+        let mut text = String::new();
+        if std::io::Read::read_to_string(&mut info, &mut text).is_err() { continue; }
+        let value = |key: &str| text.lines().find_map(|line| {
+            let (name, value) = line.split_once('=')?;
+            (name.trim() == key).then(|| value.trim().to_string())
+        }).unwrap_or_default();
+        let suite = entry.path().components().find_map(|part| {
+            let value = part.as_os_str().to_string_lossy().to_uppercase();
+            ["CTS", "GTS", "STS"].into_iter().find(|name| value == *name).map(str::to_string)
+        }).unwrap_or_else(|| "TEST".to_string());
+        rows.push(vec![suite, value("version"), value("build_number")]);
+    }
+    rows.sort_by(|a, b| a[0].cmp(&b[0]).then(a[1].cmp(&b[1])).then(a[2].cmp(&b[2])));
+    let headers = ["Suite", "Version", "Build"];
+    let widths = (0..headers.len()).map(|i| rows.iter().map(|row| row[i].len()).max().unwrap_or(0).max(headers[i].len())).collect::<Vec<_>>();
+    let row = |values: &[String]| format!("│ {} │", values.iter().enumerate().map(|(i, value)| format!("{:width$}", value, width = widths[i])).collect::<Vec<_>>().join(" │ "));
+    let mut output = row(&headers.iter().map(|v| v.to_string()).collect::<Vec<_>>());
+    for values in rows { output.push('\n'); output.push_str(&row(&values)); }
+    output
+}
+
+#[derive(serde::Deserialize, Default)]
+struct CancelRunPayload {
+    run_id: Option<String>,
+}
+
 async fn api_cancel_run(
     AxumState(state): AxumState<AppState>,
+    payload: Option<axum::extract::Json<CancelRunPayload>>,
 ) -> axum::response::Json<serde_json::Value> {
     let app = state.app_handle;
     let run_state = app.state::<RunState>();
-    match cancel_run(app.clone(), run_state) {
+    let run_id = payload.map(|p| p.0.run_id).unwrap_or(None);
+    match cancel_run(app.clone(), run_state, run_id) {
         Ok(_) => axum::response::Json(serde_json::json!({ "status": "cancelled" })),
         Err(e) => axum::response::Json(serde_json::json!({ "error": e })),
     }
@@ -762,37 +843,91 @@ async fn api_get_logs(
     AxumState(state): AxumState<AppState>,
 ) -> axum::response::Json<serde_json::Value> {
     let app = state.app_handle;
-    let log_file = {
+    let (log_file, root) = {
         let run_state = app.state::<RunState>();
         let active = run_state.active.lock().unwrap();
-        active.log_file.clone()
+        (active.log_file.clone(), active.root.clone())
     };
+    let root = root.or_else(|| resolve_auto_root(None).ok());
+    let flow_options = root.as_deref().map(log_flow_options).unwrap_or_default();
     if let Some(path) = log_file {
         if let Ok(content) = std::fs::read_to_string(&path) {
             let lines: Vec<&str> = content.lines().collect();
             let start = if lines.len() > 100 { lines.len() - 100 } else { 0 };
             let last_lines = lines[start..].join("\n");
-            return axum::response::Json(serde_json::json!({ "logs": last_lines }));
+            return axum::response::Json(serde_json::json!({ "logs": last_lines, "flow_options": flow_options }));
         }
     }
-    axum::response::Json(serde_json::json!({ "logs": "No active logs found." }))
+    axum::response::Json(serde_json::json!({ "logs": "No active logs found.", "flow_options": flow_options }))
 }
 
 #[derive(Deserialize)]
 struct RunLogsParams {
-    result_dir: String,
+    result_dir: Option<String>,
+    run_id: Option<String>,
+    suite: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RunZipParams {
+    run_id: String,
+    zip_id: usize,
+}
+
+async fn api_get_run_zip(
+    Query(params): Query<RunZipParams>,
+) -> impl IntoResponse {
+    let Some(result_dir) = resolve_log_result_dir(&params.run_id) else {
+        return axum::response::Response::builder().status(axum::http::StatusCode::NOT_FOUND).body(axum::body::Body::from("Run not found")).unwrap();
+    };
+    let mut files = fs::read_dir(&result_dir).ok().into_iter().flatten()
+        .flatten().map(|entry| entry.path()).filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("zip"))
+        .collect::<Vec<_>>();
+    files.sort();
+    let Some(path) = files.get(params.zip_id) else {
+        return axum::response::Response::builder().status(axum::http::StatusCode::NOT_FOUND).body(axum::body::Body::from("Zip not found")).unwrap();
+    };
+    match fs::read(path) {
+        Ok(bytes) => axum::response::Response::builder().header(axum::http::header::CONTENT_TYPE, "application/zip").header(axum::http::header::CONTENT_DISPOSITION, format!("attachment; filename=\"{}\"", path.file_name().unwrap_or_default().to_string_lossy())).body(axum::body::Body::from(bytes)).unwrap(),
+        Err(_) => axum::response::Response::builder().status(axum::http::StatusCode::NOT_FOUND).body(axum::body::Body::from("Zip not found")).unwrap(),
+    }
 }
 
 async fn api_get_run_logs(
     Query(params): Query<RunLogsParams>,
 ) -> axum::response::Json<serde_json::Value> {
-    let result_dir = PathBuf::from(&params.result_dir);
+    let result_dir = params
+        .result_dir
+        .filter(|value| !value.trim().is_empty())
+        .map(PathBuf::from)
+        .or_else(|| params.run_id.as_deref().and_then(resolve_log_result_dir))
+        .unwrap_or_default();
     let log_dir = result_dir.join("Log");
-    if !log_dir.is_dir() {
-        return axum::response::Json(serde_json::json!({ "error": "Log directory not found" }));
-    }
-    
+    let requested_suite = params.suite.as_deref().unwrap_or("RUNNER").to_uppercase();
+    let requested_suite = match requested_suite.as_str() {
+        "RUNNER" | "CTS" | "GTS" | "STS" | "ALL" => requested_suite,
+        _ => "ALL".to_string(),
+    };
     let mut combined_logs = String::new();
+    let mut available_suites = HashSet::new();
+    let flow_options = result_dir
+        .parent()
+        .and_then(Path::parent)
+        .map(log_flow_options)
+        .unwrap_or_default();
+    
+    // Always try to load the master run.log first
+    let run_log = result_dir.join("run.log");
+    if let Ok(content) = std::fs::read_to_string(&run_log) {
+        available_suites.insert("RUNNER");
+        if requested_suite == "ALL" || requested_suite == "RUNNER" {
+        let lines: Vec<&str> = content.lines().collect();
+        let start = if lines.len() > 80 { lines.len() - 80 } else { 0 };
+        let last_lines = lines[start..].join("\n");
+        combined_logs.push_str(&format!("--- LOG FILE: run.log ---\n{}\n\n", last_lines));
+        }
+    }
+
     if let Ok(entries) = std::fs::read_dir(&log_dir) {
         let mut log_files = Vec::new();
         for entry in entries.flatten() {
@@ -807,6 +942,11 @@ async fn api_get_run_logs(
         
         for path in log_files {
             let filename = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+            let Some(suite) = log_suite_name(&filename) else { continue };
+            available_suites.insert(suite);
+            if requested_suite != "ALL" && requested_suite != suite {
+                continue;
+            }
             if let Ok(content) = std::fs::read_to_string(&path) {
                 let lines: Vec<&str> = content.lines().collect();
                 let start = if lines.len() > 80 { lines.len() - 80 } else { 0 };
@@ -815,11 +955,123 @@ async fn api_get_run_logs(
             }
         }
     }
-    
+    let mut suite_options = vec!["ALL".to_string()];
+    suite_options.extend(
+        ["RUNNER", "CTS", "GTS", "STS"]
+            .into_iter()
+            .filter(|suite| available_suites.contains(suite))
+            .map(str::to_string),
+    );
+    let selected_suite = requested_suite;
+    let zip_options = fs::read_dir(&result_dir).ok().into_iter().flatten()
+        .flatten().map(|entry| entry.path()).filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("zip"))
+        .collect::<Vec<_>>();
+    let mut zip_options = zip_options;
+    zip_options.sort();
+    let zip_options = zip_options.iter().enumerate().map(|(id, path)| serde_json::json!({ "id": id, "title": path.file_name().unwrap_or_default().to_string_lossy() })).collect::<Vec<_>>();
     if combined_logs.is_empty() {
-        axum::response::Json(serde_json::json!({ "logs": "No log files found." }))
+        axum::response::Json(serde_json::json!({
+            "selected_suite": selected_suite,
+            "suite_options": suite_options,
+            "flow_options": flow_options,
+            "zip_options": zip_options,
+            "logs": "No log files found."
+        }))
     } else {
-        axum::response::Json(serde_json::json!({ "logs": combined_logs }))
+        axum::response::Json(serde_json::json!({
+            "selected_suite": selected_suite,
+            "suite_options": suite_options,
+            "flow_options": flow_options,
+            "zip_options": zip_options,
+            "logs": combined_logs
+        }))
+    }
+}
+
+fn log_flow_options(root: &Path) -> Vec<LogFlowOption> {
+    let mut groups: HashMap<String, LogFlowOption> = HashMap::new();
+    if let Ok(entries) = fs::read_dir(root.join("Results")) {
+        for entry in entries.flatten() {
+            let result_dir = entry.path();
+            let metadata = result_dir.join(".gba-flow.json");
+            if let Ok(content) = fs::read_to_string(metadata) {
+                if let Ok(option) = serde_json::from_str::<LogFlowOption>(&content) {
+                    groups.insert(option.run_id.clone(), option);
+                }
+            } else if result_dir.is_dir() && result_dir.join("Log").is_dir() {
+                let parts = result_dir
+                    .file_name()
+                    .unwrap_or_default()
+                    .to_string_lossy()
+                    .split('_')
+                    .map(str::to_string)
+                    .collect::<Vec<_>>();
+                if let Some(devs) = parts.iter().position(|part| part.ends_with("devs")) {
+                    if devs >= 2 {
+                        let test_type = parts[..devs - 2].join(" ");
+                        let model = &parts[devs - 2];
+                        let pda = &parts[devs - 1];
+                        let folder_name = result_dir
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy()
+                            .to_string();
+                        let mut hasher = DefaultHasher::new();
+                        folder_name.hash(&mut hasher);
+                        let run_id = format!("legacy_{:x}", hasher.finish());
+                        groups.entry(run_id.clone()).or_insert_with(|| LogFlowOption {
+                            id: run_id.clone(),
+                            title: format!("{} | {} | {}", test_type, model, pda),
+                            run_id,
+                            result_dir: Some(result_dir.display().to_string()),
+                        });
+                    }
+                }
+            }
+        }
+    }
+    for device in read_busy_registry(root).devices.into_values() {
+        let entry = groups.entry(device.run_id.clone()).or_insert_with(|| LogFlowOption {
+            id: device.run_id.clone(),
+            title: format!(
+                "{} | {} | {} [{}]",
+                device.test_type, device.model, device.pda, device.serial
+            ),
+            run_id: device.run_id.clone(),
+            result_dir: device.result_dir.clone(),
+        });
+        if !entry.title.ends_with(&format!("[{}]", device.serial)) {
+            entry.title = entry.title.trim_end_matches(']').to_string();
+            entry.title.push_str(&format!(",{}]", device.serial));
+        }
+        if entry.result_dir.is_none() {
+            entry.result_dir = device.result_dir;
+        }
+    }
+    let mut options: Vec<_> = groups.into_values().collect();
+    options.sort_by(|a, b| a.title.cmp(&b.title));
+    options
+}
+
+fn resolve_log_result_dir(run_id: &str) -> Option<PathBuf> {
+    let root = resolve_auto_root(None).ok()?;
+    log_flow_options(&root)
+        .into_iter()
+        .find(|option| option.run_id == run_id)
+        .and_then(|option| option.result_dir)
+        .map(PathBuf::from)
+}
+
+fn log_suite_name(filename: &str) -> Option<&'static str> {
+    let lower = filename.to_lowercase();
+    if lower.contains("cts") {
+        Some("CTS")
+    } else if lower.contains("gts") {
+        Some("GTS")
+    } else if lower.contains("sts") {
+        Some("STS")
+    } else {
+        None
     }
 }
 
@@ -836,6 +1088,7 @@ async fn api_get_status() -> axum::response::Json<serde_json::Value> {
         return axum::response::Json(serde_json::json!({
             "status": "RUNNING",
             "running_devices": devices,
+            "log_options": log_flow_options(&root),
             "last_run": serde_json::Value::Null,
         }));
     }
@@ -850,6 +1103,7 @@ async fn api_get_status() -> axum::response::Json<serde_json::Value> {
                 return axum::response::Json(serde_json::json!({
                     "status": status_str,
                     "running_devices": Vec::<BusyDevice>::new(),
+                    "log_options": log_flow_options(&root),
                     "last_run": last_run,
                 }));
             }
@@ -859,6 +1113,7 @@ async fn api_get_status() -> axum::response::Json<serde_json::Value> {
     axum::response::Json(serde_json::json!({
         "status": "IDLE",
         "running_devices": Vec::<BusyDevice>::new(),
+        "log_options": Vec::<LogFlowOption>::new(),
         "last_run": serde_json::Value::Null,
     }))
 }
@@ -891,14 +1146,18 @@ async fn api_screenshot(
 }
 
 #[tauri::command]
-fn cancel_run(app: AppHandle, run_state: State<'_, RunState>) -> Result<(), String> {
-    let pids = {
+fn cancel_run(app: AppHandle, run_state: State<'_, RunState>, run_id: Option<String>) -> Result<(), String> {
+    let pids: Vec<u32> = {
         let active = run_state.active.lock().map_err(|err| err.to_string())?;
         if !active.running {
             emit_log(&app, "[runner] No active run to cancel.");
             return Ok(());
         }
-        active.pids.clone()
+        if let Some(target) = run_id {
+            active.pids.iter().filter(|(r, _)| r == &target).map(|(_, p)| *p).collect()
+        } else {
+            active.pids.iter().map(|(_, p)| *p).collect()
+        }
     };
 
     emit_log(&app, format!("[runner] Terminating {} process(es).", pids.len()));
@@ -1010,6 +1269,7 @@ fn open_scrcpy(serial: String) -> Result<(), String> {
 }
 
 fn run_suite_blocking(app: AppHandle, root: PathBuf, request: RunSuiteRequest, run_id: String) -> Result<i32, String> {
+    set_current_run_id(Some(run_id.clone()));
     fs::create_dir_all(root.join("Results")).map_err(|err| err.to_string())?;
 
     let all_devices = request
@@ -1026,17 +1286,37 @@ fn run_suite_blocking(app: AppHandle, root: PathBuf, request: RunSuiteRequest, r
     let pda = first_non_empty(&[prop(&first_props, "ro.build.PDA"), "UNKNOWN".to_string()]);
     let suffix = timestamp_compact();
     let session_name = format!(
-        "{}_{}_{}_{}devs_{}",
+        "{}_{}_{}_{}devs_{}_{}",
         sanitize_name(&request.test_type),
         sanitize_name(&model),
         sanitize_name(&pda),
         all_devices.len(),
-        suffix
+        suffix,
+        sanitize_name(&run_id)
     );
     let session_dir = root.join("Results").join(session_name);
     let log_dir = session_dir.join("Log");
     fs::create_dir_all(&log_dir).map_err(|err| format!("Cannot create result dir: {err}"))?;
+    let flow_option = LogFlowOption {
+        id: run_id.clone(),
+        title: format!(
+            "[{}] {} | {}\n{} [{}]",
+            log_title_timestamp(),
+            request.test_type,
+            model,
+            pda,
+            all_devices.join(",")
+        ),
+        run_id: run_id.clone(),
+        result_dir: Some(session_dir.display().to_string()),
+    };
+    let _ = fs::write(
+        session_dir.join(".gba-flow.json"),
+        serde_json::to_vec_pretty(&flow_option).unwrap_or_default(),
+    );
     write_latest_result_hint(&root, &session_dir);
+    
+    update_busy_device_result_dir(&root, &run_id, &session_dir.display().to_string());
     
     // Register run.log immediately so early errors are captured
     let run_log = session_dir.join("run.log");
@@ -1248,6 +1528,12 @@ struct LaundrySource {
     cts_results: Vec<PathBuf>,
     gts_results: Vec<PathBuf>,
     sts_results: Vec<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
+struct DeviceInfoSources {
+    property: PathBuf,
+    client_id: Option<PathBuf>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1535,7 +1821,7 @@ fn run_laundry_initial_gts(
     _pda: &str,
     run_id: &str,
     test_type: &str,
-) -> Result<PathBuf, String> {
+) -> Result<DeviceInfoSources, String> {
     let gts_root = resolve_gts_root(root, "")?;
     let gts_exe = gts_root.join("tools/gts-tradefed");
     if !gts_exe.is_file() {
@@ -1564,18 +1850,32 @@ fn run_laundry_initial_gts(
     if outcome.exit_code != 0 {
         emit_log(app, "[runner] Initial GTS returned non-zero; trying to collect deviceinfo anyway.");
     }
-    let deviceinfo = latest_property_deviceinfo(&gts_root.join("results"))
+    let property_deviceinfo = latest_property_deviceinfo(&gts_root.join("results"))
         .ok_or_else(|| "PropertyDeviceInfo.deviceinfo.json not found after initial GTS".to_string())?;
-    emit_log(app, format!("[runner] Deviceinfo source: {}", deviceinfo.display()));
-    let stable_deviceinfo = session_dir.join(format!(
+    let client_id_deviceinfo = latest_client_id_deviceinfo(&gts_root.join("results"));
+    emit_log(app, format!("[runner] Deviceinfo source: {}", property_deviceinfo.display()));
+    let stable_property = session_dir.join(format!(
         "PropertyDeviceInfo_{}_{}.deviceinfo.json",
         sanitize_name(&devices.join("_")),
         timestamp_compact()
     ));
-    fs::copy(&deviceinfo, &stable_deviceinfo)
-        .map_err(|err| format!("Cannot preserve deviceinfo {}: {err}", deviceinfo.display()))?;
-    emit_log(app, format!("[runner] Deviceinfo preserved: {}", stable_deviceinfo.display()));
-    Ok(stable_deviceinfo)
+    fs::copy(&property_deviceinfo, &stable_property)
+        .map_err(|err| format!("Cannot preserve deviceinfo {}: {err}", property_deviceinfo.display()))?;
+    let stable_client_id = client_id_deviceinfo.map(|source| {
+        let target = session_dir.join(format!(
+            "ClientIdDeviceInfo_{}_{}.deviceinfo.json",
+            sanitize_name(&devices.join("_")),
+            timestamp_compact()
+        ));
+        fs::copy(&source, &target)
+            .map(|_| target)
+            .map_err(|err| format!("Cannot preserve deviceinfo {}: {err}", source.display()))
+    }).transpose()?;
+    emit_log(app, format!("[runner] Deviceinfo preserved: {}", stable_property.display()));
+    if let Some(path) = &stable_client_id {
+        emit_log(app, format!("[runner] ClientId deviceinfo preserved: {}", path.display()));
+    }
+    Ok(DeviceInfoSources { property: stable_property, client_id: stable_client_id })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1588,7 +1888,7 @@ fn run_laundry_retries_with_deviceinfo(
     devices: &[String],
     source_root: &Path,
     source_results: &[PathBuf],
-    deviceinfo: &Path,
+    deviceinfos: &DeviceInfoSources,
     timeout_secs: u64,
     model: &str,
     pda: &str,
@@ -1607,7 +1907,7 @@ fn run_laundry_retries_with_deviceinfo(
             with_info
         ),
     );
-    run_laundry_retries(app, root, session_dir, log_dir, suite, devices, source_root, source_results, Some(deviceinfo), timeout_secs, model, pda, run_id, test_type)
+    run_laundry_retries(app, root, session_dir, log_dir, suite, devices, source_root, source_results, Some(deviceinfos), timeout_secs, model, pda, run_id, test_type)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1654,7 +1954,7 @@ fn run_laundry_retries(
     devices: &[String],
     source_root: &Path,
     source_results: &[PathBuf],
-    replacement_deviceinfo: Option<&Path>,
+    replacement_deviceinfos: Option<&DeviceInfoSources>,
     timeout_secs: u64,
     model: &str,
     pda: &str,
@@ -1682,26 +1982,35 @@ fn run_laundry_retries(
         copy_dir_recursive(source, &target)
             .map_err(|err| format!("Cannot stage {} to {}: {err}", source.display(), target.display()))?;
         cleanup_deviceinfo_backups(&target);
-        if let Some(replacement) = replacement_deviceinfo {
-            if let Some(target_info) = property_deviceinfo_in_result(&target) {
-                fs::copy(replacement, &target_info)
-                    .map_err(|err| format!("Cannot replace {}: {err}", target_info.display()))?;
-                cleanup_deviceinfo_backups(&target);
-                emit_log(app, format!("[runner] {suite}: replaced {}", target_info.display()));
-            } else {
-                emit_log(app, format!("[runner] {suite}: no PropertyDeviceInfo in {}; retrying NOT_EXECUTED without replace.", target.display()));
+        if let Some(replacements) = replacement_deviceinfos {
+            for (name, source, target_info) in [
+                ("PropertyDeviceInfo", Some(&replacements.property), property_deviceinfo_in_result(&target)),
+                ("ClientIdDeviceInfo", replacements.client_id.as_ref(), client_id_deviceinfo_in_result(&target)),
+            ] {
+                if let (Some(source), Some(target_info)) = (source, target_info) {
+                    fs::copy(source, &target_info)
+                        .map_err(|err| format!("Cannot replace {}: {err}", target_info.display()))?;
+                    emit_log(app, format!("[runner] {suite}: replaced {} ({name})", target_info.display()));
+                }
             }
+            cleanup_deviceinfo_backups(&target);
         }
-        let session_id = resolve_retry_session_id(
-            app,
-            suite,
-            &executable,
-            target
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or(&timestamp),
-            &log_dir.join(format!("laundry_list_{}_{}_{}devs.log", suite.to_lowercase(), index + 1, devices.len())),
-        )?;
+        let result_dir_name = target
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(&timestamp);
+        let session_id = if suite == "CTS" {
+            "0".to_string()
+        } else {
+            resolve_retry_session_id(
+                app,
+                suite,
+                &executable,
+                result_dir_name,
+                &log_dir.join(format!("laundry_list_{}_{}_{}devs.log", suite.to_lowercase(), index + 1, devices.len())),
+                run_id,
+            )?
+        };
         let cmd = format!(
             "run retry --retry {session_id} --retry-type NOT_EXECUTED --shard-count {}{}",
             devices.len(),
@@ -1780,11 +2089,12 @@ fn resolve_retry_session_id(
     executable: &Path,
     result_dir_name: &str,
     log_file: &Path,
+    run_id: &str,
 ) -> Result<String, String> {
     emit_log(app, format!("[runner] {suite}: resolving retry session for {result_dir_name}"));
     let mut last_output = String::new();
     for attempt in 1..=5 {
-        let output = run_tradefed_console_command(app, suite, executable, "l r", log_file, 45)?;
+        let output = run_tradefed_console_command(app, suite, executable, "l r", log_file, 45, run_id)?;
         if let Some(session_id) = parse_retry_session_id(&output, result_dir_name) {
             emit_log(app, format!("[runner] {suite}: matched retry session {session_id} for {result_dir_name}"));
             return Ok(session_id);
@@ -1822,6 +2132,7 @@ fn run_tradefed_console_command(
     console_command: &str,
     log_file: &Path,
     timeout_secs: u64,
+    run_id: &str,
 ) -> Result<String, String> {
     write_log_header(log_file, suite, console_command)?;
     let executable_name = executable
@@ -1844,7 +2155,7 @@ fn run_tradefed_console_command(
         .spawn()
         .map_err(|err| format!("Failed to start {suite} console: {err}"))?;
     let pid = child.id();
-    register_pid(app, pid);
+    register_pid(app, run_id, pid);
     emit_log(app, format!("[{suite}] console pid={pid} command={console_command}"));
 
     let output = Arc::new(Mutex::new(String::new()));
@@ -1860,7 +2171,7 @@ fn run_tradefed_console_command(
                     text.push_str(&line);
                     text.push('\n');
                 }
-                let _ = app_stdout.emit("gba-run-log", format!("[{suite_stdout}] {line}"));
+                emit_log_event(&app_stdout, format!("[{suite_stdout}] {line}"));
             }
         });
     }
@@ -1876,7 +2187,7 @@ fn run_tradefed_console_command(
                     text.push_str(&line);
                     text.push('\n');
                 }
-                let _ = app_stderr.emit("gba-run-log", format!("[{suite_stderr}] {line}"));
+                emit_log_event(&app_stderr, format!("[{suite_stderr}] {line}"));
             }
         });
     }
@@ -2118,7 +2429,7 @@ fn run_suite_process(
         .spawn()
         .map_err(|err| format!("Failed to start {suite}: {err}"))?;
     let pid = child.id();
-    register_pid(app, pid);
+    register_pid(app, run_id, pid);
     emit_log(app, format!("[{suite}] started pid={pid}"));
 
     if via_pipe {
@@ -2132,7 +2443,7 @@ fn run_suite_process(
     }
 
     register_log_file(app, log_file);
-    pipe_child_output(app.clone(), suite.to_string(), log_file.to_path_buf(), &mut child);
+    pipe_child_output(app.clone(), suite.to_string(), log_file.to_path_buf(), &mut child, run_id.to_string());
 
     let started = Instant::now();
     let exit_code = wait_with_timeout(app, &mut child, suite, devices, log_file, timeout_secs, run_id, test_type, publish_status);
@@ -2298,24 +2609,28 @@ fn suite_log_has_completion_marker(log_file: &Path) -> bool {
         .any(|line| line.contains("Result/Log Location") || line.contains("=============== Summary ==============="))
 }
 
-fn pipe_child_output(app: AppHandle, suite: String, log_file: PathBuf, child: &mut Child) {
+fn pipe_child_output(app: AppHandle, suite: String, log_file: PathBuf, child: &mut Child, run_id: String) {
     if let Some(stdout) = child.stdout.take() {
         let app_stdout = app.clone();
         let suite_stdout = suite.clone();
         let log_stdout = log_file.clone();
+        let run_id_stdout = run_id.clone();
         thread::spawn(move || {
+            set_current_run_id(Some(run_id_stdout));
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 append_file_line(&log_stdout, &line);
-                let _ = app_stdout.emit("gba-run-log", format!("[{suite_stdout}] {line}"));
+                emit_log_event(&app_stdout, format!("[{suite_stdout}] {line}"));
             }
         });
     }
     if let Some(stderr) = child.stderr.take() {
         let app_stderr = app;
+        let run_id_stderr = run_id.clone();
         thread::spawn(move || {
+            set_current_run_id(Some(run_id_stderr));
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
                 append_file_line(&log_file, &line);
-                let _ = app_stderr.emit("gba-run-log", format!("[{suite}] {line}"));
+                emit_log_event(&app_stderr, format!("[{suite}] {line}"));
             }
         });
     }
@@ -2894,24 +3209,38 @@ fn push_unique(items: &mut Vec<PathBuf>, value: PathBuf) {
 }
 
 fn property_deviceinfo_in_result(result_dir: &Path) -> Option<PathBuf> {
-    let direct = result_dir
-        .join("device-info-files")
-        .join("PropertyDeviceInfo.deviceinfo.json");
+    deviceinfo_in_result(result_dir, "PropertyDeviceInfo.deviceinfo.json")
+}
+
+fn client_id_deviceinfo_in_result(result_dir: &Path) -> Option<PathBuf> {
+    deviceinfo_in_result(result_dir, "ClientIdDeviceInfo.deviceinfo.json")
+}
+
+fn deviceinfo_in_result(result_dir: &Path, filename: &str) -> Option<PathBuf> {
+    let direct = result_dir.join("device-info-files").join(filename);
     if direct.is_file() {
         return Some(direct);
     }
     WalkDir::new(result_dir)
         .into_iter()
         .flatten()
-        .find(|entry| entry.file_type().is_file() && entry.file_name() == "PropertyDeviceInfo.deviceinfo.json")
+        .find(|entry| entry.file_type().is_file() && entry.file_name() == filename)
         .map(|entry| entry.path().to_path_buf())
 }
 
 fn latest_property_deviceinfo(results_dir: &Path) -> Option<PathBuf> {
+    latest_deviceinfo(results_dir, "PropertyDeviceInfo.deviceinfo.json")
+}
+
+fn latest_client_id_deviceinfo(results_dir: &Path) -> Option<PathBuf> {
+    latest_deviceinfo(results_dir, "ClientIdDeviceInfo.deviceinfo.json")
+}
+
+fn latest_deviceinfo(results_dir: &Path, filename: &str) -> Option<PathBuf> {
     WalkDir::new(results_dir)
         .into_iter()
         .flatten()
-        .filter(|entry| entry.file_type().is_file() && entry.file_name() == "PropertyDeviceInfo.deviceinfo.json")
+        .filter(|entry| entry.file_type().is_file() && entry.file_name() == filename)
         .filter_map(|entry| {
             let path = entry.path().to_path_buf();
             let modified = fs::metadata(&path).and_then(|metadata| metadata.modified()).ok()?;
@@ -2927,7 +3256,7 @@ fn cleanup_deviceinfo_backups(result_dir: &Path) {
             continue;
         }
         let name = entry.file_name().to_string_lossy();
-        if name.contains("PropertyDeviceInfo") && name.ends_with(".bak") {
+        if (name.contains("PropertyDeviceInfo") || name.contains("ClientIdDeviceInfo")) && name.ends_with(".bak") {
             let _ = fs::remove_file(entry.path());
         }
     }
@@ -3105,8 +3434,47 @@ fn parse_summary(log_file: &Path, suite: &str, devices: &str, run_id: &str, test
     }
 }
 
+thread_local! {
+    static CURRENT_RUN_ID: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(None);
+}
+
+#[derive(Clone, serde::Serialize)]
+struct LogPayload {
+    run_id: Option<String>,
+    line: String,
+}
+
+pub fn set_current_run_id(run_id: Option<String>) {
+    CURRENT_RUN_ID.with(|id| *id.borrow_mut() = run_id);
+}
+
 fn emit_log(app: &AppHandle, line: impl AsRef<str>) {
-    let _ = app.emit("gba-run-log", line.as_ref().to_string());
+    let line = line.as_ref().to_string();
+    if let Ok(root) = resolve_auto_root(None) {
+        let result_dir = latest_result_dir_hint(&root.display().to_string());
+        if !result_dir.is_empty() {
+            append_file_line(&Path::new(&result_dir).join("run.log"), &line);
+        }
+    }
+    emit_log_event(app, line);
+}
+
+fn emit_log_event(app: &AppHandle, line: impl Into<String>) {
+    let run_id = CURRENT_RUN_ID.with(|id| id.borrow().clone());
+    let _ = app.emit("gba-run-log", LogPayload {
+        run_id,
+        line: line.into(),
+    });
+}
+
+fn log_title_timestamp() -> String {
+    Command::new("date")
+        .arg("+%d/%m/%Y, %H:%M:%S")
+        .output()
+        .ok()
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "00:00:00".to_string())
 }
 
 fn emit_status(
@@ -3131,6 +3499,12 @@ fn emit_status(
             log_file: log_file.display().to_string(),
         },
     );
+    
+    if let Ok(root) = resolve_auto_root(None) {
+        if status == "Running" || status == "Starting" {
+            update_busy_device_suite(&root, run_id, suite, devices);
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3161,15 +3535,15 @@ fn emit_laundry_result_update(
     );
 }
 
-fn register_pid(app: &AppHandle, pid: u32) {
+fn register_pid(app: &AppHandle, run_id: &str, pid: u32) {
     if let Ok(mut active) = app.state::<RunState>().active.lock() {
-        active.pids.push(pid);
+        active.pids.push((run_id.to_string(), pid));
     }
 }
 
 fn unregister_pid(app: &AppHandle, pid: u32) {
     if let Ok(mut active) = app.state::<RunState>().active.lock() {
-        active.pids.retain(|value| *value != pid);
+        active.pids.retain(|(_, p)| *p != pid);
     }
 }
 
@@ -3282,6 +3656,27 @@ fn write_busy_registry(root: &Path, registry: &BusyRegistry) -> Result<(), Strin
     fs::write(&path, text).map_err(|err| format!("Cannot write {}: {err}", path.display()))
 }
 
+fn update_busy_device_suite(root: &std::path::Path, run_id: &str, suite: &str, serials: &str) {
+    let mut busy = read_busy_registry(root);
+    let serials = serials.split(',').collect::<HashSet<_>>();
+    for device in busy.devices.values_mut() {
+        if device.run_id == run_id && serials.contains(device.serial.as_str()) {
+            device.current_suite = Some(suite.to_string());
+        }
+    }
+    let _ = write_busy_registry(root, &busy);
+}
+
+fn update_busy_device_result_dir(root: &std::path::Path, run_id: &str, result_dir: &str) {
+    let mut busy = read_busy_registry(root);
+    for device in busy.devices.values_mut() {
+        if device.run_id == run_id {
+            device.result_dir = Some(result_dir.to_string());
+        }
+    }
+    let _ = write_busy_registry(root, &busy);
+}
+
 fn mark_busy_devices(root: &Path, request: &RunSuiteRequest, serials: &[String], run_id: &str) -> Result<(), String> {
     let mut registry = read_busy_registry(root);
     let started_at = timestamp_compact();
@@ -3291,6 +3686,12 @@ fn mark_busy_devices(root: &Path, request: &RunSuiteRequest, serials: &[String],
             serial.clone(),
             BusyDevice {
                 serial: serial.clone(),
+                is_userdebug: request.userdebug_devices.iter().any(|item| item == serial)
+                    || {
+                        let build_type = prop(&props, "ro.build.type").to_lowercase();
+                        prop(&props, "ro.build.fingerprint").to_lowercase().contains("userdebug")
+                            || build_type.contains("userdebug")
+                    },
                 test_type: request.test_type.clone(),
                 model: first_non_empty(&[
                     prop(&props, "ro.product.model"),
@@ -3299,6 +3700,8 @@ fn mark_busy_devices(root: &Path, request: &RunSuiteRequest, serials: &[String],
                 pda: first_non_empty(&[prop(&props, "ro.build.PDA"), "UNKNOWN".to_string()]),
                 run_id: run_id.to_string(),
                 started_at: started_at.clone(),
+                result_dir: None,
+                current_suite: Some("SOURCE".to_string()),
             },
         );
     }
