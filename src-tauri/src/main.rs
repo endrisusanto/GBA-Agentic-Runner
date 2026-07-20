@@ -2485,18 +2485,27 @@ fn run_suite_process(
     test_type: &str,
     publish_status: bool,
 ) -> Result<SuiteOutcome, String> {
+    let devices_text = devices.join(",");
+    if publish_status {
+        emit_status(app, suite, "Waiting", &devices_text, 0, log_file, run_id, test_type);
+    }
+    emit_log(app, format!("[runner] {suite}: queued for shared ADB slot ({devices_text})"));
+    write_log_header(log_file, suite, suite_command)?;
+
     let _gts_guard = if suite == "GTS" {
-        Some(GTS_RUN_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|err| err.into_inner()))
+        let lock = GTS_RUN_LOCK.get_or_init(|| Mutex::new(()));
+        if lock.try_lock().is_err() {
+            emit_log(app, "[runner] GTS: waiting for another GTS run to finish.");
+        }
+        Some(lock.lock().unwrap_or_else(|err| err.into_inner()))
     } else {
         None
     };
-    let devices_text = devices.join(",");
     if publish_status {
         emit_status(app, suite, "Starting", &devices_text, 0, log_file, run_id, test_type);
     }
     emit_log(app, format!("[runner] {suite}: launching tradefed for {devices_text}"));
     emit_log(app, format!("[{suite}] {suite_command}"));
-    write_log_header(log_file, suite, suite_command)?;
 
     let executable_name = executable
         .file_name()
