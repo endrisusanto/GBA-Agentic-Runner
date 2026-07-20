@@ -1088,7 +1088,7 @@ dependencies = [
 
 [[package]]
 name = "gba-agentic-runner"
-version = "0.0.33"
+version = "0.0.35"
 dependencies = [
  "axum",
  "reqwest 0.12.28",

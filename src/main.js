@@ -139,7 +139,6 @@ app.innerHTML = `
       <section class="run-options">
         <label class="retry">Retry <input id="retryInput" type="number" min="0" max="99" /></label>
         <label class="retry">Timeout <input id="timeoutInput" type="number" min="60" /></label>
-        <label class="check"><input id="wifiInput" type="checkbox" /> Wi-Fi</label>
       </section>
 
       <section class="test-area" id="testArea"></section>
@@ -297,7 +296,6 @@ const els = {
   settingsOutput: document.querySelector("#settingsOutput"),
   retryInput: document.querySelector("#retryInput"),
   timeoutInput: document.querySelector("#timeoutInput"),
-  wifiInput: document.querySelector("#wifiInput"),
   clearLogBtn: document.querySelector("#clearLogBtn"),
   statusLine: document.querySelector("#statusLine"),
   deviceFooter: document.querySelector("#deviceFooter"),
@@ -319,7 +317,6 @@ const els = {
 
 els.retryInput.value = state.retryCount;
 els.timeoutInput.value = state.timeoutSecs;
-els.wifiInput.checked = state.wifi.enabled;
 
 els.refreshBtn.addEventListener("click", refreshDevices);
 els.resetBusyBtn.addEventListener("click", resetBusyState);
@@ -365,10 +362,6 @@ els.flowResizer.addEventListener("pointerdown", startFlowResize);
   }
 els.retryInput.addEventListener("change", saveInlineSettings);
 els.timeoutInput.addEventListener("change", saveInlineSettings);
-els.wifiInput.addEventListener("change", () => {
-  state.wifi.enabled = els.wifiInput.checked;
-  localStorage.setItem("autoWifiAutoConnect", String(state.wifi.enabled));
-});
 document.addEventListener("keydown", (event) => {
   if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "b") {
     event.preventDefault();
@@ -587,7 +580,7 @@ function renderDevices() {
   const devicesByModel = new Map();
   [...state.devices]
     .sort((a, b) => {
-      const status = (device) => Number(Boolean(device.busy || device.busy_reason)) + Number(state.completedDevices.has(device.serial));
+      const status = (device) => state.completedDevices.has(device.serial) ? 2 : Number(Boolean(device.busy || device.busy_reason));
       return modelKey(a).localeCompare(modelKey(b)) || status(a) - status(b) || String(a.serial).localeCompare(String(b.serial));
     })
     .forEach((device) => {
@@ -742,17 +735,13 @@ function renderLog() {
   const flow = state.logFlows.get(state.activeLogFlow);
   const tab = flow?.tabs?.get(state.activeLogSubtab);
   els.logBox.textContent = (tab?.lines || []).slice(-600).join("\n");
-  // ponytail: do not auto-scroll if user is hovering to read
-  if (!els.logBox.matches(":hover")) {
-    els.logBox.scrollTop = els.logBox.scrollHeight;
-  }
 }
 
 function renderLogTabs() {
   if (!state.logFlows.size) {
     createBootLogFlow();
   }
-  els.logFlowTabs.innerHTML = [...state.logFlows.values()].map((flow) => `
+  els.logFlowTabs.innerHTML = [...state.logFlows.values()].reverse().map((flow) => `
     <span class="log-tab-wrap ${flow.id === state.activeLogFlow ? "active" : ""}">
       <button class="log-tab" data-flow="${escapeHtml(flow.id)}" title="${escapeHtml(flow.title)}">${escapeHtml(flow.title)}</button>
       <button class="log-tab-close" data-close-log="${escapeHtml(flow.id)}" ${flow.id === "boot" ? "disabled" : ""} title="${state.activeRuns.has(flow.id) ? "Emergency stop and close" : "Close"}">×</button>
@@ -871,6 +860,7 @@ function startFlowResize(event) {
 }
 
 function renderFlowMap() {
+  const previousScrollTop = els.flowMap.querySelector(".run-table-content-area")?.scrollTop || 0;
   if (!isLaundryMode(state.selectedMode)) {
     const mode = TEST_MODES.find((item) => item.id === state.selectedMode);
     els.flowMap.innerHTML = `
@@ -960,6 +950,7 @@ function renderFlowMap() {
       </div>
     </div>
   `;
+  els.flowMap.querySelector(".run-table-content-area").scrollTop = previousScrollTop;
 
   // Bind tab buttons
   els.flowMap.querySelectorAll(".run-tab-btn").forEach((btn) => {
@@ -1117,7 +1108,7 @@ function renderSuiteStatus() {
     byRun.get(runId).push(status);
   });
 
-  els.suiteList.innerHTML = [...byRun.entries()].map(([runId, runStatuses]) => {
+  els.suiteList.innerHTML = [...byRun.entries()].reverse().map(([runId, runStatuses]) => {
     const flow = state.flows.get(runId) || { mode: runStatuses[0]?.test_type || "Run", flow: "", devices: "" };
     const sortedStatuses = [...runStatuses].sort(compareSuiteStatuses);
     const deviceModel = getDeviceModelsForFlow(flow);
@@ -1738,7 +1729,6 @@ function saveSettings(close = true) {
   localStorage.setItem("autoWifiAutoConnect", String(state.wifi.enabled));
   localStorage.setItem("autoWifiSsid", state.wifi.ssid);
   localStorage.setItem("autoWifiPassword", state.wifi.password);
-  els.wifiInput.checked = state.wifi.enabled;
   appendLog("[settings] Saved.");
   if (close) closeSettings();
 }
