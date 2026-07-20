@@ -76,9 +76,10 @@ const state = {
   flows: new Map(),
   logFlows: new Map(),
   activeLogFlow: "",
-  activeLogSubtab: "Runner",
+  activeLogSubtab: "AI Worker",
   suiteStatuses: new Map(),
   summaries: new Map(),
+  resultDirs: new Map(),
   resultDir: "",
   runStartedAt: null,
   runElapsedSecs: 0,
@@ -96,8 +97,8 @@ app.innerHTML = `
       <div class="brand">
         <img class="brand-mark" src="${agenticLogo}" alt="GBA" />
         <div>
-          <h1>GBA Agentic Runner</h1>
-          <p>Runner</p>
+          <h1>GBA Agentic AI Worker</h1>
+          <p>AI Worker</p>
         </div>
       </div>
       <button class="icon-button settings-button" id="settingsBtn" title="Settings" aria-label="Settings">
@@ -425,7 +426,7 @@ listen("gba-summary", (event) => {
   const payload = event.payload || {};
   ensureFlow(payload.run_id, payload.test_type, payload.devices);
   state.summaries.set(`${payload.run_id || "legacy"}:${payload.suite}:${payload.devices || ""}`, payload);
-  appendRunnerLogForRun(payload.run_id || "legacy", `[runner] Summary ${payload.suite || "-"} ${payload.devices || "-"}: total=${payload.total ?? 0} pass=${payload.passed ?? 0} fail=${payload.failed ?? 0} runtime=${payload.run_time || "N/A"}`);
+  appendRunnerLogForRun(payload.run_id || "legacy", `[AI Worker] Summary ${payload.suite || "-"} ${payload.devices || "-"}: total=${payload.total ?? 0} pass=${payload.passed ?? 0} fail=${payload.failed ?? 0} runtime=${payload.run_time || "N/A"}`);
   renderFlowMap();
   renderSuiteStatus();
   renderMetrics();
@@ -444,6 +445,7 @@ listen("gba-laundry-result-update", (event) => {
 listen("gba-run-finished", (event) => {
   const payload = event.payload || {};
   if (payload.run_id) {
+    if (payload.result_dir) state.resultDirs.set(payload.run_id, payload.result_dir);
     const finishedSerials = state.runDevices.get(payload.run_id) || [];
     finishedSerials.forEach((serial) => {
       state.selected.delete(serial);
@@ -454,7 +456,9 @@ listen("gba-run-finished", (event) => {
     state.runDevices.delete(payload.run_id);
   }
   state.running = state.activeRuns.size > 0;
-  state.resultDir = payload.result_dir || state.resultDir;
+  if (payload.run_id === state.activeLogFlow || !state.resultDir) {
+    state.resultDir = payload.result_dir || state.resultDir;
+  }
   els.runBtn.disabled = false;
   els.cancelBtn.disabled = state.activeRuns.size === 0;
   els.openResultBtn.disabled = !state.resultDir;
@@ -462,14 +466,14 @@ listen("gba-run-finished", (event) => {
   els.resultPill.textContent = state.resultDir ? "Open" : "None";
   els.statusLine.textContent = payload.exit_code === 0 ? "Completed" : "Finished with issue";
   appendRunSummaryToLog(payload.run_id || "legacy");
-  appendRunnerLogForRun(payload.run_id || "legacy", `[runner] Finished exit=${payload.exit_code} result=${state.resultDir || "N/A"}`);
+  appendRunnerLogForRun(payload.run_id || "legacy", `[AI Worker] Finished exit=${payload.exit_code} result=${state.resultDir || "N/A"}`);
   if (Number(payload.exit_code) !== 0) showInfoModal("Run Finished With Issue", `Exit code ${payload.exit_code}`, [`Result: ${state.resultDir || "N/A"}`], "error");
   renderFlowMap();
   renderMetrics();
 });
 
 listen("gba-tool-error", (event) => {
-  showInfoModal("Tool Error", "Runner reported an error.", [String(event.payload || "")], "error");
+  showInfoModal("Tool Error", "AI Worker reported an error.", [String(event.payload || "")], "error");
 });
 
 init();
@@ -750,8 +754,9 @@ function renderLogTabs() {
   els.logFlowTabs.querySelectorAll(".log-tab").forEach((button) => {
     button.addEventListener("click", () => {
       state.activeLogFlow = button.dataset.flow;
+      state.resultDir = state.resultDirs.get(state.activeLogFlow) || "";
       const flow = state.logFlows.get(state.activeLogFlow);
-      if (flow && !flow.tabs.has(state.activeLogSubtab)) state.activeLogSubtab = "Runner";
+      if (flow && !flow.tabs.has(state.activeLogSubtab)) state.activeLogSubtab = "AI Worker";
       renderLog();
     });
   });
@@ -1623,7 +1628,7 @@ async function emergencyStop(reason = "Emergency stop") {
     await refreshDevices();
   } catch (error) {
     appendLog(`[runner] Emergency stop failed: ${error}`);
-    showInfoModal("Cancel Failed", "Runner could not cancel the active process.", [String(error)], "error");
+    showInfoModal("Cancel Failed", "AI Worker could not cancel the active process.", [String(error)], "error");
     els.cancelBtn.disabled = state.activeRuns.size === 0;
   }
 }
@@ -1649,9 +1654,10 @@ async function resetBusyState() {
 }
 
 async function openResult() {
-  if (!state.resultDir) return;
+  const resultDir = state.resultDirs.get(state.activeLogFlow) || state.resultDir;
+  if (!resultDir) return;
   try {
-    await invoke("open_result", { path: state.resultDir });
+    await invoke("open_result", { path: resultDir });
   } catch (error) {
     appendLog(`[runner] Open result failed: ${error}`);
     showInfoModal("Open Result Failed", "Cannot open result folder.", [String(error)], "error");
@@ -1877,7 +1883,7 @@ function validateLaundrySmrSelection() {
 }
 
 function appendLog(line, runId = null) {
-  const text = redact(String(line || ""));
+  const text = redact(String(line || "")).replaceAll("[runner]", "[AI Worker]");
   const stamp = new Date().toLocaleTimeString("en-GB", { hour12: false });
   const kind = logKind(text);
   
@@ -1895,10 +1901,10 @@ function appendLog(line, runId = null) {
 }
 
 function appendRunnerLogForRun(runId, line) {
-  const text = redact(String(line || ""));
+  const text = redact(String(line || "")).replaceAll("[runner]", "[AI Worker]");
   const stamp = new Date().toLocaleTimeString("en-GB", { hour12: false });
   const flow = state.logFlows.get(runId) || createBootLogFlow();
-  const tab = ensureLogSubtab(flow.id, "Runner");
+  const tab = ensureLogSubtab(flow.id, "AI Worker");
   tab.lines.push(`${stamp} ${text}`);
   renderLog();
 }
@@ -1913,7 +1919,7 @@ function createRunLogFlow(runId, modeName, devices) {
     tabs: new Map(),
   };
   state.logFlows.set(runId, flow);
-  ensureLogSubtab(runId, "Runner");
+  ensureLogSubtab(runId, "AI Worker");
   const mode = TEST_MODES.find((item) => item.id === modeName);
   if (mode?.needs === "user" || mode?.needs === "both") {
     ensureLogSubtab(runId, "CTS");
@@ -1923,7 +1929,7 @@ function createRunLogFlow(runId, modeName, devices) {
     ensureLogSubtab(runId, "STS");
   }
   state.activeLogFlow = runId;
-  state.activeLogSubtab = "Runner";
+  state.activeLogSubtab = "AI Worker";
 }
 
 function clearInactiveLogTabs() {
@@ -1934,17 +1940,17 @@ function clearInactiveLogTabs() {
   }
   if (!state.logFlows.has(state.activeLogFlow)) {
     state.activeLogFlow = [...state.logFlows.keys()][0] || "";
-    state.activeLogSubtab = "Runner";
+    state.activeLogSubtab = "AI Worker";
   }
 }
 
 async function closeLogFlow(flowId) {
   if (!flowId || flowId === "boot") return;
-  if (state.activeRuns.has(flowId)) await emergencyStop(`Closing runner tab ${flowId}`);
+  if (state.activeRuns.has(flowId)) await emergencyStop(`Closing AI Worker tab ${flowId}`);
   state.logFlows.delete(flowId);
   if (state.activeLogFlow === flowId) {
     state.activeLogFlow = [...state.logFlows.keys()][0] || "";
-    state.activeLogSubtab = "Runner";
+    state.activeLogSubtab = "AI Worker";
   }
   renderLog();
 }
@@ -2029,7 +2035,7 @@ function createBootLogFlow() {
   const id = "boot";
   if (!state.logFlows.has(id)) {
     state.logFlows.set(id, { id, title: "RUNNING LOG", tabs: new Map() });
-    ensureLogSubtab(id, "Runner");
+    ensureLogSubtab(id, "AI Worker");
   }
   if (!state.activeLogFlow) state.activeLogFlow = id;
   return state.logFlows.get(id);
@@ -2041,7 +2047,7 @@ function appendRunSummaryToLog(runId) {
   const total = summaries.reduce((sum, item) => sum + Number(item.total || 0), 0);
   const passed = summaries.reduce((sum, item) => sum + Number(item.passed || 0), 0);
   const failed = summaries.reduce((sum, item) => sum + Number(item.failed || 0), 0);
-  appendRunnerLogForRun(runId, `[runner] Flow summary: suites=${summaries.length} total=${total} pass=${passed} fail=${failed}`);
+  appendRunnerLogForRun(runId, `[AI Worker] Flow summary: suites=${summaries.length} total=${total} pass=${passed} fail=${failed}`);
 }
 
 function logKind(text) {
@@ -2050,7 +2056,7 @@ function logKind(text) {
   if (prefix === "cts") return "CTS";
   if (prefix === "gts") return "GTS";
   if (prefix === "sts") return "STS";
-  return "Runner";
+  return "AI Worker";
 }
 
 function currentModeFlow() {

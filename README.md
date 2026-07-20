@@ -1,6 +1,6 @@
-# GBA Agentic Runner
+# GBA Agentic AI Worker
 
-Desktop runner berbasis Tauri untuk otomatisasi CTS, GTS, dan STS dari folder AUTO.
+Desktop AI Worker berbasis Tauri untuk otomatisasi CTS, GTS, dan STS dari folder AUTO.
 
 ## Fitur
 

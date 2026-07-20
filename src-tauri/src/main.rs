@@ -8,9 +8,11 @@ use std::hash::{Hash, Hasher};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
 use tauri::{AppHandle, Emitter, Manager, State};
 use tempfile::TempDir;
 use walkdir::WalkDir;
@@ -513,7 +515,9 @@ fn run_suite(
             &busy_serials,
         );
 
-        let result_dir = latest_result_dir_hint(&request.auto_root);
+        let result_dir = result_dir_for_run(Path::new(&request.auto_root), &run_id)
+            .map(|path| path.display().to_string())
+            .unwrap_or_default();
         let _ = app.emit(
             "gba-run-finished",
             RunFinished {
@@ -657,7 +661,9 @@ async fn api_run_suite(
             &busy_serials,
         );
 
-        let result_dir = latest_result_dir_hint(&request.auto_root);
+        let result_dir = result_dir_for_run(Path::new(&request.auto_root), &run_id_clone)
+            .map(|path| path.display().to_string())
+            .unwrap_or_default();
         let summary = log_file.map(|lf| parse_summary(&lf, "Test", &busy_serials.join(","), &run_id_clone, &request.test_type));
 
         let finished_payload = RunFinished {
@@ -1518,6 +1524,7 @@ fn run_suite_blocking(app: AppHandle, root: PathBuf, request: RunSuiteRequest, r
 
     let final_code = if exit_codes.iter().all(|code| *code == 0) { 0 } else { 1 };
     emit_log(&app, format!("[runner] Completed with exit={final_code}."));
+    let _ = fs::remove_dir_all(root.join(".gba-workspaces").join(sanitize_name(&run_id)));
     Ok(final_code)
 }
 
@@ -1641,6 +1648,7 @@ fn run_laundry_smr(
         let run_id_sts = run_id.to_string();
         let test_type_sts = request.test_type.clone();
         Some(thread::spawn(move || {
+            set_current_run_id(Some(run_id_sts.clone()));
             run_laundry_retries_without_deviceinfo(
                 &app_sts,
                 &root_sts,
@@ -1823,7 +1831,8 @@ fn run_laundry_initial_gts(
     test_type: &str,
 ) -> Result<DeviceInfoSources, String> {
     let gts_root = resolve_gts_root(root, "")?;
-    let gts_exe = gts_root.join("tools/gts-tradefed");
+    let gts_workspace = suite_workspace(root, &gts_root, run_id)?;
+    let gts_exe = gts_workspace.join("tools/gts-tradefed");
     if !gts_exe.is_file() {
         return Err(format!("gts-tradefed not found: {}", gts_exe.display()));
     }
@@ -1850,7 +1859,7 @@ fn run_laundry_initial_gts(
     if outcome.exit_code != 0 {
         emit_log(app, "[runner] Initial GTS returned non-zero; trying to collect deviceinfo anyway.");
     }
-    let property_deviceinfo = latest_property_deviceinfo(&gts_root.join("results"))
+    let property_deviceinfo = latest_property_deviceinfo(&gts_workspace.join("results"))
         .ok_or_else(|| "PropertyDeviceInfo.deviceinfo.json not found after initial GTS".to_string())?;
     let client_id_deviceinfo = latest_client_id_deviceinfo(&gts_root.join("results"));
     emit_log(app, format!("[runner] Deviceinfo source: {}", property_deviceinfo.display()));
@@ -1965,11 +1974,12 @@ fn run_laundry_retries(
     for (index, source) in source_results.iter().enumerate() {
         emit_laundry_result_update(app, source_root, source, run_id, test_type, suite, "Staging result", 0, None);
         let suite_root = suite_root_for_laundry_result(root, suite, devices, source)?;
-        let executable = tradefed_tool_for_suite(&suite_root, suite)?;
+        let suite_workspace = suite_workspace(root, &suite_root, run_id)?;
+        let executable = tradefed_tool_for_suite(&suite_workspace, suite)?;
         if !executable.is_file() {
             return Err(format!("{suite} tradefed not found: {}", executable.display()));
         }
-        let results_dir = suite_root.join("results");
+        let results_dir = suite_workspace.join("results");
         fs::create_dir_all(&results_dir).map_err(|err| format!("Cannot create {}: {err}", results_dir.display()))?;
         let mut timestamp = get_local_timestamp();
         let mut target = results_dir.join(&timestamp);
@@ -2019,10 +2029,10 @@ fn run_laundry_retries(
         emit_log(app, format!("[runner] {suite}: retry session={session_id} result={}", target.display()));
         let log_file = log_dir.join(format!("laundry_retry_{}_{}_{}devs.log", suite.to_lowercase(), index + 1, devices.len()));
         let copy_started = SystemTime::now();
-        let result_snapshot = ResultSnapshot::capture(&suite_root.join("results"));
+        let result_snapshot = ResultSnapshot::capture(&suite_workspace.join("results"));
         emit_laundry_result_update(app, source_root, source, run_id, test_type, suite, "Running", 0, None);
-        let outcome = run_suite_process(app, suite, devices, &executable, &suite_root, &cmd, suite != "STS", &log_file, timeout_secs, run_id, test_type, true)?;
-        copy_laundry_retry_artifact(app, session_dir, suite, &suite_root, &target, &result_snapshot, copy_started, model, pda, devices, index + 1)?;
+        let outcome = run_suite_process(app, suite, devices, &executable, &suite_workspace, &cmd, suite != "STS", &log_file, timeout_secs, run_id, test_type, true)?;
+        copy_laundry_retry_artifact(app, session_dir, suite, &suite_workspace, &target, &result_snapshot, copy_started, model, pda, devices, index + 1)?;
         let summary = parse_summary(&log_file, suite, &devices.join(","), run_id, test_type);
         emit_laundry_result_update(
             app,
@@ -2829,7 +2839,29 @@ fn same_suite_os_version(left: &str, right: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::same_suite_os_version;
+    use super::{same_suite_os_version, suite_workspace};
+    use std::fs;
+
+    #[cfg(unix)]
+    #[test]
+    fn suite_workspace_isolated_per_run() {
+        let temp = tempfile::tempdir().unwrap();
+        let suite = temp.path().join("android-gts");
+        fs::create_dir_all(suite.join("tools")).unwrap();
+        fs::create_dir_all(suite.join("testcases")).unwrap();
+        fs::create_dir_all(suite.join("results")).unwrap();
+        fs::create_dir_all(suite.join("logs")).unwrap();
+        fs::write(suite.join("tools/gts-tradefed"), "#!/bin/bash\n").unwrap();
+        fs::write(suite.join("testcases/test.jar"), "jar").unwrap();
+
+        let first = suite_workspace(temp.path(), &suite, "run-one").unwrap();
+        let second = suite_workspace(temp.path(), &suite, "run-two").unwrap();
+        assert_ne!(first, second);
+        assert!(first.join("results").is_dir(), "{}", first.display());
+        assert!(second.join("results").is_dir());
+        assert!(!fs::symlink_metadata(first.join("tools/gts-tradefed")).unwrap().file_type().is_symlink());
+        assert!(fs::symlink_metadata(first.join("testcases")).unwrap().file_type().is_symlink());
+    }
 
     #[test]
     fn cts_revisions_must_keep_the_same_os_version() {
@@ -3438,6 +3470,49 @@ thread_local! {
     static CURRENT_RUN_ID: std::cell::RefCell<Option<String>> = std::cell::RefCell::new(None);
 }
 
+static BUSY_REGISTRY_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+
+fn suite_workspace(root: &Path, suite_root: &Path, run_id: &str) -> Result<PathBuf, String> {
+    #[cfg(unix)]
+    {
+        let mut hasher = DefaultHasher::new();
+        suite_root.hash(&mut hasher);
+        let workspace = root.join(".gba-workspaces").join(sanitize_name(run_id)).join(format!("suite_{:x}", hasher.finish()));
+        let install = workspace.join(suite_root.file_name().unwrap_or_default());
+        if install.exists() {
+            return Ok(install);
+        }
+        fs::create_dir_all(&install).map_err(|err| format!("Cannot create workspace {}: {err}", install.display()))?;
+        for entry in fs::read_dir(suite_root).map_err(|err| format!("Cannot read suite root {}: {err}", suite_root.display()))?.flatten() {
+            let name = entry.file_name();
+            if name == "results" || name == "logs" {
+                fs::create_dir(install.join(&name)).map_err(|err| format!("Cannot create workspace directory: {err}"))?;
+                continue;
+            }
+            let target = install.join(&name);
+            if name == "tools" && entry.path().is_dir() {
+                fs::create_dir(&target).map_err(|err| format!("Cannot create workspace tools: {err}"))?;
+                for tool in fs::read_dir(entry.path()).map_err(|err| err.to_string())?.flatten() {
+                    let tool_target = target.join(tool.file_name());
+                    if matches!(tool.file_name().to_str(), Some("cts-tradefed" | "gts-tradefed" | "sts-tradefed" | "test-utils-script")) {
+                        fs::copy(tool.path(), &tool_target).map_err(|err| format!("Cannot copy {}: {err}", tool.path().display()))?;
+                    } else {
+                        symlink(tool.path(), &tool_target).map_err(|err| format!("Cannot link {}: {err}", tool.path().display()))?;
+                    }
+                }
+            } else {
+                symlink(entry.path(), &target).map_err(|err| format!("Cannot link {}: {err}", entry.path().display()))?;
+            }
+        }
+        Ok(install)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (root, run_id);
+        Ok(suite_root.to_path_buf())
+    }
+}
+
 #[derive(Clone, serde::Serialize)]
 struct LogPayload {
     run_id: Option<String>,
@@ -3449,14 +3524,22 @@ pub fn set_current_run_id(run_id: Option<String>) {
 }
 
 fn emit_log(app: &AppHandle, line: impl AsRef<str>) {
-    let line = line.as_ref().to_string();
-    if let Ok(root) = resolve_auto_root(None) {
-        let result_dir = latest_result_dir_hint(&root.display().to_string());
-        if !result_dir.is_empty() {
-            append_file_line(&Path::new(&result_dir).join("run.log"), &line);
+    let line = line.as_ref().replace("[runner]", "[AI Worker]");
+    let run_id = CURRENT_RUN_ID.with(|id| id.borrow().clone());
+    if let (Some(run_id), Ok(root)) = (run_id, resolve_auto_root(None)) {
+        if let Some(result_dir) = result_dir_for_run(&root, &run_id) {
+            append_file_line(&result_dir.join("run.log"), &line);
         }
     }
     emit_log_event(app, line);
+}
+
+fn result_dir_for_run(root: &Path, run_id: &str) -> Option<PathBuf> {
+    fs::read_dir(root.join("Results")).ok()?.flatten().map(|entry| entry.path())
+        .find(|dir| dir.join(".gba-flow.json").is_file() &&
+            fs::read_to_string(dir.join(".gba-flow.json")).ok()
+                .and_then(|text| serde_json::from_str::<LogFlowOption>(&text).ok())
+                .is_some_and(|flow| flow.run_id == run_id))
 }
 
 fn emit_log_event(app: &AppHandle, line: impl Into<String>) {
@@ -3653,10 +3736,13 @@ fn read_busy_registry(root: &Path) -> BusyRegistry {
 fn write_busy_registry(root: &Path, registry: &BusyRegistry) -> Result<(), String> {
     let path = busy_registry_path(root);
     let text = serde_json::to_string_pretty(registry).map_err(|err| err.to_string())?;
-    fs::write(&path, text).map_err(|err| format!("Cannot write {}: {err}", path.display()))
+    let tmp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+    fs::write(&tmp, text).map_err(|err| format!("Cannot write {}: {err}", tmp.display()))?;
+    fs::rename(&tmp, &path).map_err(|err| format!("Cannot replace {}: {err}", path.display()))
 }
 
 fn update_busy_device_suite(root: &std::path::Path, run_id: &str, suite: &str, serials: &str) {
+    let _guard = BUSY_REGISTRY_LOCK.get_or_init(|| Mutex::new(())).lock().ok();
     let mut busy = read_busy_registry(root);
     let serials = serials.split(',').collect::<HashSet<_>>();
     for device in busy.devices.values_mut() {
@@ -3668,6 +3754,7 @@ fn update_busy_device_suite(root: &std::path::Path, run_id: &str, suite: &str, s
 }
 
 fn update_busy_device_result_dir(root: &std::path::Path, run_id: &str, result_dir: &str) {
+    let _guard = BUSY_REGISTRY_LOCK.get_or_init(|| Mutex::new(())).lock().ok();
     let mut busy = read_busy_registry(root);
     for device in busy.devices.values_mut() {
         if device.run_id == run_id {
@@ -3678,6 +3765,7 @@ fn update_busy_device_result_dir(root: &std::path::Path, run_id: &str, result_di
 }
 
 fn mark_busy_devices(root: &Path, request: &RunSuiteRequest, serials: &[String], run_id: &str) -> Result<(), String> {
+    let _guard = BUSY_REGISTRY_LOCK.get_or_init(|| Mutex::new(())).lock().map_err(|err| err.to_string())?;
     let mut registry = read_busy_registry(root);
     let started_at = timestamp_compact();
     for serial in serials {
@@ -3712,6 +3800,7 @@ fn clear_busy_devices(root: &Path, serials: &[String]) {
     if serials.is_empty() {
         return;
     }
+    let Ok(_guard) = BUSY_REGISTRY_LOCK.get_or_init(|| Mutex::new(())).lock() else { return };
     let mut registry = read_busy_registry(root);
     for serial in serials {
         registry.devices.remove(serial);
@@ -3965,14 +4054,12 @@ fn timestamp_compact() -> String {
 }
 
 fn write_latest_result_hint(root: &Path, session_dir: &Path) {
-    let _ = fs::write(root.join(".gba-agentic-latest-result"), session_dir.display().to_string());
-}
-
-fn latest_result_dir_hint(root_value: &str) -> String {
-    let root = Path::new(root_value);
-    fs::read_to_string(root.join(".gba-agentic-latest-result"))
-        .map(|value| value.trim().to_string())
-        .unwrap_or_default()
+    let _ = fs::create_dir_all(root.join(".gba-agentic-results"));
+    if let Ok(flow) = fs::read_to_string(session_dir.join(".gba-flow.json")) {
+        if let Ok(value) = serde_json::from_str::<LogFlowOption>(&flow) {
+            let _ = fs::write(root.join(".gba-agentic-results").join(sanitize_name(&value.run_id)), session_dir.display().to_string());
+        }
+    }
 }
 
 fn xml_escape(value: &str) -> String {
