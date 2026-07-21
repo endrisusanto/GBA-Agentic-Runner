@@ -1,111 +1,25 @@
 {
   "devices": {
-    "R32W50150FZ": {
-      "serial": "R32W50150FZ",
-      "is_userdebug": true,
-      "test_type": "Laundry SMR",
-      "model": "SM-X510",
-      "pda": "X510XXSEEZG3",
-      "run_id": "Laundry_SMR_1784560775626_2",
-      "started_at": "1784560775",
-      "result_dir": "/run/media/endri-pro/BINARY_HDD/AUTO/Results/Laundry_SMR_SM-X510_X510XXSEEZG3_2devs_1784560776_Laundry_SMR_1784560775626_2",
-      "current_suite": "STS",
-      "suite_statuses": {
-        "STS": {
-          "status": "Completed",
-          "elapsed_secs": 337
-        }
-      }
-    },
-    "R3CTA0AVKVJ": {
-      "serial": "R3CTA0AVKVJ",
-      "is_userdebug": true,
-      "test_type": "Laundry SMR",
-      "model": "SM-A346E",
-      "pda": "A346EXXSFFZG4",
-      "run_id": "Laundry_SMR_1784560775964_3",
-      "started_at": "1784560776",
-      "result_dir": "/run/media/endri-pro/BINARY_HDD/AUTO/Results/Laundry_SMR_SM-A346E_A346EXXSFFZG4_2devs_1784560776_Laundry_SMR_1784560775964_3",
-      "current_suite": "STS",
-      "suite_statuses": {
-        "STS": {
-          "status": "Completed",
-          "elapsed_secs": 185
-        }
-      }
-    },
-    "RR2Y8000X8X": {
-      "serial": "RR2Y8000X8X",
-      "is_userdebug": true,
-      "test_type": "Laundry SMR",
-      "model": "SM-X406B",
-      "pda": "X406BXXS6CZG3",
-      "run_id": "Laundry_SMR_1784560777019_6",
-      "started_at": "1784560777",
-      "result_dir": "/run/media/endri-pro/BINARY_HDD/AUTO/Results/Laundry_SMR_SM-X406B_X406BXXS6CZG3_2devs_1784560777_Laundry_SMR_1784560777019_6",
-      "current_suite": "STS",
-      "suite_statuses": {
-        "STS": {
-          "status": "Completed",
-          "elapsed_secs": 376
-        }
-      }
-    },
-    "R3CW70X6M9F": {
-      "serial": "R3CW70X6M9F",
-      "is_userdebug": true,
-      "test_type": "Laundry SMR",
-      "model": "SM-A256E",
-      "pda": "A256EXXSDEZG2",
-      "run_id": "Laundry_SMR_1784560776310_4",
-      "started_at": "1784560776",
-      "result_dir": "/run/media/endri-pro/BINARY_HDD/AUTO/Results/Laundry_SMR_SM-A256E_A256EXXSDEZG2_2devs_1784560776_Laundry_SMR_1784560776310_4",
-      "current_suite": "STS",
-      "suite_statuses": {
-        "STS": {
-          "status": "Completed",
-          "elapsed_secs": 61
-        }
-      }
-    },
-    "R3CTB0TDQKN": {
-      "serial": "R3CTB0TDQKN",
+    "R32W400KX3E": {
+      "serial": "R32W400KX3E",
       "is_userdebug": false,
       "test_type": "Laundry SMR",
-      "model": "SM-A346E",
-      "pda": "A346EXXSFFZG4",
-      "run_id": "Laundry_SMR_1784560775964_3",
-      "started_at": "1784560776",
-      "result_dir": "/run/media/endri-pro/BINARY_HDD/AUTO/Results/Laundry_SMR_SM-A346E_A346EXXSFFZG4_2devs_1784560776_Laundry_SMR_1784560775964_3",
-      "current_suite": "SOURCE",
-      "suite_statuses": {}
-    },
-    "R32W5014WTN": {
-      "serial": "R32W5014WTN",
-      "is_userdebug": false,
-      "test_type": "Laundry SMR",
-      "model": "SM-X510",
-      "pda": "X510XXSEEZG3",
-      "run_id": "Laundry_SMR_1784560775626_2",
-      "started_at": "1784560775",
-      "result_dir": "/run/media/endri-pro/BINARY_HDD/AUTO/Results/Laundry_SMR_SM-X510_X510XXSEEZG3_2devs_1784560776_Laundry_SMR_1784560775626_2",
-      "current_suite": "SOURCE",
-      "suite_statuses": {}
-    },
-    "R3CY411EG1T": {
-      "serial": "R3CY411EG1T",
-      "is_userdebug": true,
-      "test_type": "Laundry SMR",
-      "model": "SM-A176B",
-      "pda": "A176BXXS6CZG7",
-      "run_id": "Laundry_SMR_1784560776675_5",
-      "started_at": "1784560776",
-      "result_dir": "/run/media/endri-pro/BINARY_HDD/AUTO/Results/Laundry_SMR_SM-A176B_A176BXXS6CZG7_2devs_1784560777_Laundry_SMR_1784560776675_5",
-      "current_suite": "STS",
+      "model": "SM-X710",
+      "pda": "X710XXS6EZG3",
+      "run_id": "Laundry_SMR_1784596027401_1",
+      "started_at": "1784596027",
+      "result_dir": "/run/media/endri-pro/BINARY_HDD/AUTO/Results/Laundry_SMR_SM-X710_X710XXS6EZG3_2devs_1784596027_Laundry_SMR_1784596027401_1",
+      "current_suite": "GTS",
       "suite_statuses": {
-        "STS": {
+        "CTS": {
           "status": "Completed",
-          "elapsed_secs": 377
+          "elapsed_secs": 99,
+          "zip_file": "CTS_retry1_SM-X710_X710XXS6EZG3_R32W400KX3E_2026.07.21_08.10.38.zip"
+        },
+        "GTS": {
+          "status": "Waiting",
+          "elapsed_secs": 0,
+          "zip_file": null
         }
       }
     },
@@ -115,55 +29,97 @@
       "test_type": "Laundry SMR",
       "model": "SM-X710",
       "pda": "X710XXS6EZG3",
-      "run_id": "Laundry_SMR_1784560775462_1",
-      "started_at": "1784560775",
-      "result_dir": "/run/media/endri-pro/BINARY_HDD/AUTO/Results/Laundry_SMR_SM-X710_X710XXS6EZG3_2devs_1784560775_Laundry_SMR_1784560775462_1",
+      "run_id": "Laundry_SMR_1784596027401_1",
+      "started_at": "1784596027",
+      "result_dir": "/run/media/endri-pro/BINARY_HDD/AUTO/Results/Laundry_SMR_SM-X710_X710XXS6EZG3_2devs_1784596027_Laundry_SMR_1784596027401_1",
       "current_suite": "STS",
       "suite_statuses": {
         "STS": {
           "status": "Completed",
-          "elapsed_secs": 51
+          "elapsed_secs": 32,
+          "zip_file": "STS_retry1_SM-X710_X710XXS6EZG3_R32W401ADDV_2026.07.21_08.07.15.zip"
         }
       }
     },
-    "R3CY411EG0J": {
-      "serial": "R3CY411EG0J",
+    "R3CTB0TDQKN": {
+      "serial": "R3CTB0TDQKN",
       "is_userdebug": false,
       "test_type": "Laundry SMR",
-      "model": "SM-A176B",
-      "pda": "A176BXXS6CZG7",
-      "run_id": "Laundry_SMR_1784560776675_5",
-      "started_at": "1784560776",
-      "result_dir": "/run/media/endri-pro/BINARY_HDD/AUTO/Results/Laundry_SMR_SM-A176B_A176BXXS6CZG7_2devs_1784560777_Laundry_SMR_1784560776675_5",
-      "current_suite": "SOURCE",
-      "suite_statuses": {}
-    },
-    "R3CW70X5P3H": {
-      "serial": "R3CW70X5P3H",
-      "is_userdebug": false,
-      "test_type": "Laundry SMR",
-      "model": "SM-A256E",
-      "pda": "A256EXXSDEZG2",
-      "run_id": "Laundry_SMR_1784560776310_4",
-      "started_at": "1784560776",
-      "result_dir": "/run/media/endri-pro/BINARY_HDD/AUTO/Results/Laundry_SMR_SM-A256E_A256EXXSDEZG2_2devs_1784560776_Laundry_SMR_1784560776310_4",
-      "current_suite": "SOURCE",
-      "suite_statuses": {}
-    },
-    "R32W400KX3E": {
-      "serial": "R32W400KX3E",
-      "is_userdebug": false,
-      "test_type": "Laundry SMR",
-      "model": "SM-X710",
-      "pda": "X710XXS6EZG3",
-      "run_id": "Laundry_SMR_1784560775462_1",
-      "started_at": "1784560775",
-      "result_dir": "/run/media/endri-pro/BINARY_HDD/AUTO/Results/Laundry_SMR_SM-X710_X710XXS6EZG3_2devs_1784560775_Laundry_SMR_1784560775462_1",
+      "model": "SM-A346E",
+      "pda": "A346EXXSFFZG4",
+      "run_id": "Laundry_SMR_1784596028099_4",
+      "started_at": "1784596028",
+      "result_dir": "/run/media/endri-pro/BINARY_HDD/AUTO/Results/Laundry_SMR_SM-A346E_A346EXXSFFZG4_2devs_1784596028_Laundry_SMR_1784596028099_4",
       "current_suite": "CTS",
       "suite_statuses": {
         "CTS": {
+          "status": "Running",
+          "elapsed_secs": 178,
+          "zip_file": null
+        }
+      }
+    },
+    "R32W4012TBR": {
+      "serial": "R32W4012TBR",
+      "is_userdebug": false,
+      "test_type": "Laundry SMR",
+      "model": "SM-X916B",
+      "pda": "X916BXXS6EZG3",
+      "run_id": "Laundry_SMR_1784596027587_2",
+      "started_at": "1784596027",
+      "result_dir": "/run/media/endri-pro/BINARY_HDD/AUTO/Results/Laundry_SMR_SM-X916B_X916BXXS6EZG3_2devs_1784596027_Laundry_SMR_1784596027587_2",
+      "current_suite": "GTS",
+      "suite_statuses": {
+        "GTS": {
+          "status": "Waiting",
+          "elapsed_secs": 0,
+          "zip_file": null
+        },
+        "CTS": {
           "status": "Completed",
-          "elapsed_secs": 172
+          "elapsed_secs": 162,
+          "zip_file": "CTS_retry1_SM-X916B_X916BXXS6EZG3_R32W4012TBR_2026.07.21_08.13.55.zip"
+        }
+      }
+    },
+    "R32W500JT3N": {
+      "serial": "R32W500JT3N",
+      "is_userdebug": true,
+      "test_type": "Laundry SMR",
+      "model": "SM-X916B",
+      "pda": "X916BXXS6EZG3",
+      "run_id": "Laundry_SMR_1784596027587_2",
+      "started_at": "1784596027",
+      "result_dir": "/run/media/endri-pro/BINARY_HDD/AUTO/Results/Laundry_SMR_SM-X916B_X916BXXS6EZG3_2devs_1784596027_Laundry_SMR_1784596027587_2",
+      "current_suite": "STS",
+      "suite_statuses": {
+        "STS": {
+          "status": "Completed",
+          "elapsed_secs": 30,
+          "zip_file": "STS_retry1_SM-X916B_X916BXXS6EZG3_R32W500JT3N_2026.07.21_08.07.19.zip"
+        }
+      }
+    },
+    "R32W5014WTN": {
+      "serial": "R32W5014WTN",
+      "is_userdebug": false,
+      "test_type": "Laundry SMR",
+      "model": "SM-X510",
+      "pda": "X510XXSEEZG3",
+      "run_id": "Laundry_SMR_1784596027787_3",
+      "started_at": "1784596027",
+      "result_dir": "/run/media/endri-pro/BINARY_HDD/AUTO/Results/Laundry_SMR_SM-X510_X510XXSEEZG3_2devs_1784596028_Laundry_SMR_1784596027787_3",
+      "current_suite": "GTS",
+      "suite_statuses": {
+        "GTS": {
+          "status": "Waiting",
+          "elapsed_secs": 0,
+          "zip_file": null
+        },
+        "CTS": {
+          "status": "Completed",
+          "elapsed_secs": 242,
+          "zip_file": "CTS_retry1_SM-X510_X510XXSEEZG3_R32W5014WTN_2026.07.21_08.18.58.zip"
         }
       }
     },
@@ -173,11 +129,125 @@
       "test_type": "Laundry SMR",
       "model": "SM-X406B",
       "pda": "X406BXXS6CZG3",
-      "run_id": "Laundry_SMR_1784560777019_6",
-      "started_at": "1784560777",
-      "result_dir": "/run/media/endri-pro/BINARY_HDD/AUTO/Results/Laundry_SMR_SM-X406B_X406BXXS6CZG3_2devs_1784560777_Laundry_SMR_1784560777019_6",
+      "run_id": "Laundry_SMR_1784596845153_1",
+      "started_at": "1784596845",
+      "result_dir": "/run/media/endri-pro/BINARY_HDD/AUTO/Results/Laundry_SMR_SM-X406B_X406BXXS6CZG3_2devs_1784596845_Laundry_SMR_1784596845153_1",
       "current_suite": "SOURCE",
       "suite_statuses": {}
+    },
+    "R3CW70X6M9F": {
+      "serial": "R3CW70X6M9F",
+      "is_userdebug": true,
+      "test_type": "Laundry SMR",
+      "model": "SM-A256E",
+      "pda": "A256EXXSDEZG2",
+      "run_id": "Laundry_SMR_1784596028346_5",
+      "started_at": "1784596028",
+      "result_dir": "/run/media/endri-pro/BINARY_HDD/AUTO/Results/Laundry_SMR_SM-A256E_A256EXXSDEZG2_2devs_1784596028_Laundry_SMR_1784596028346_5",
+      "current_suite": "STS",
+      "suite_statuses": {
+        "STS": {
+          "status": "Completed",
+          "elapsed_secs": 35,
+          "zip_file": "STS_retry1_SM-A256E_A256EXXSDEZG2_R3CW70X6M9F_2026.07.21_08.07.39.zip"
+        }
+      }
+    },
+    "R3CTA0AVKVJ": {
+      "serial": "R3CTA0AVKVJ",
+      "is_userdebug": true,
+      "test_type": "Laundry SMR",
+      "model": "SM-A346E",
+      "pda": "A346EXXSFFZG4",
+      "run_id": "Laundry_SMR_1784596028099_4",
+      "started_at": "1784596028",
+      "result_dir": "/run/media/endri-pro/BINARY_HDD/AUTO/Results/Laundry_SMR_SM-A346E_A346EXXSFFZG4_2devs_1784596028_Laundry_SMR_1784596028099_4",
+      "current_suite": "STS",
+      "suite_statuses": {
+        "STS": {
+          "status": "Completed",
+          "elapsed_secs": 105,
+          "zip_file": "STS_retry1_SM-A346E_A346EXXSFFZG4_R3CTA0AVKVJ_2026.07.21_08.07.31.zip"
+        }
+      }
+    },
+    "R3CW70X5P3H": {
+      "serial": "R3CW70X5P3H",
+      "is_userdebug": false,
+      "test_type": "Laundry SMR",
+      "model": "SM-A256E",
+      "pda": "A256EXXSDEZG2",
+      "run_id": "Laundry_SMR_1784596028346_5",
+      "started_at": "1784596028",
+      "result_dir": "/run/media/endri-pro/BINARY_HDD/AUTO/Results/Laundry_SMR_SM-A256E_A256EXXSDEZG2_2devs_1784596028_Laundry_SMR_1784596028346_5",
+      "current_suite": "SOURCE",
+      "suite_statuses": {}
+    },
+    "RR2Y8000X8X": {
+      "serial": "RR2Y8000X8X",
+      "is_userdebug": true,
+      "test_type": "Laundry SMR",
+      "model": "SM-X406B",
+      "pda": "X406BXXS6CZG3",
+      "run_id": "Laundry_SMR_1784596845153_1",
+      "started_at": "1784596845",
+      "result_dir": "/run/media/endri-pro/BINARY_HDD/AUTO/Results/Laundry_SMR_SM-X406B_X406BXXS6CZG3_2devs_1784596845_Laundry_SMR_1784596845153_1",
+      "current_suite": "STS",
+      "suite_statuses": {
+        "STS": {
+          "status": "Completed",
+          "elapsed_secs": 46,
+          "zip_file": "STS_retry1_SM-X406B_X406BXXS6CZG3_RR2Y8000X8X_2026.07.21_08.20.52.zip"
+        }
+      }
+    },
+    "R3CY411EG0J": {
+      "serial": "R3CY411EG0J",
+      "is_userdebug": false,
+      "test_type": "Laundry SMR",
+      "model": "SM-A176B",
+      "pda": "A176BXXS6CZG7",
+      "run_id": "Laundry_SMR_1784596028703_6",
+      "started_at": "1784596028",
+      "result_dir": "/run/media/endri-pro/BINARY_HDD/AUTO/Results/Laundry_SMR_SM-A176B_A176BXXS6CZG7_2devs_1784596029_Laundry_SMR_1784596028703_6",
+      "current_suite": "SOURCE",
+      "suite_statuses": {}
+    },
+    "R32W50150FZ": {
+      "serial": "R32W50150FZ",
+      "is_userdebug": true,
+      "test_type": "Laundry SMR",
+      "model": "SM-X510",
+      "pda": "X510XXSEEZG3",
+      "run_id": "Laundry_SMR_1784596027787_3",
+      "started_at": "1784596027",
+      "result_dir": "/run/media/endri-pro/BINARY_HDD/AUTO/Results/Laundry_SMR_SM-X510_X510XXSEEZG3_2devs_1784596028_Laundry_SMR_1784596027787_3",
+      "current_suite": "STS",
+      "suite_statuses": {
+        "STS": {
+          "status": "Completed",
+          "elapsed_secs": 37,
+          "zip_file": "STS_retry1_SM-X510_X510XXSEEZG3_R32W50150FZ_2026.07.21_08.07.23.zip"
+        }
+      }
+    },
+    "R3CY411EG1T": {
+      "serial": "R3CY411EG1T",
+      "is_userdebug": true,
+      "test_type": "Laundry SMR",
+      "model": "SM-A176B",
+      "pda": "A176BXXS6CZG7",
+      "run_id": "Laundry_SMR_1784596028703_6",
+      "started_at": "1784596028",
+      "result_dir": "/run/media/endri-pro/BINARY_HDD/AUTO/Results/Laundry_SMR_SM-A176B_A176BXXS6CZG7_2devs_1784596029_Laundry_SMR_1784596028703_6",
+      "current_suite": "STS",
+      "suite_statuses": {
+        "STS": {
+          "status": "Completed",
+          "elapsed_secs": 41,
+          "zip_file": "STS_retry1_SM-A176B_A176BXXS6CZG7_R3CY411EG1T_2026.07.21_08.07.35.zip"
+        }
+      }
     }
   }
 }
