@@ -27,6 +27,9 @@ use tokio::net::TcpListener;
 const DEVICE_RECONNECT_TIMEOUT_SECS: u64 = 300;
 // ponytail: serialize GTS tradefed to protect the shared ADB server; shard/process parallelism can be added if ADB isolation is available.
 static GTS_RUN_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static GHIDRA_PREP_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+// ponytail: serialize STS because Tradefed GhidraPreparer shares /tmp/tradefed_ghidra; isolate temp dirs if parallel STS is needed.
+static STS_RUN_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 #[cfg(unix)]
 use std::os::unix::process::CommandExt;
@@ -197,6 +200,8 @@ struct BusyDevice {
 struct SuiteRuntimeStatus {
     status: String,
     elapsed_secs: u64,
+    #[serde(default)]
+    zip_file: Option<String>,
 }
 
 #[derive(Default)]
@@ -667,7 +672,7 @@ async fn api_run_suite(
             }
         };
 
-        let (log_file, result_zip) = {
+        let log_file = {
             let run_state = app.state::<RunState>();
             let mut active = run_state.active.lock().unwrap();
             active.busy_serials.retain(|serial| !busy_serials.contains(serial));
@@ -677,8 +682,7 @@ async fn api_run_suite(
                 active.root = None;
                 active.log_file = None;
             }
-            let zip = first_zip(&PathBuf::from(&request.auto_root).join("results")).map(|p| p.display().to_string());
-            (lf, zip)
+            lf
         };
 
         clear_busy_devices(
@@ -689,6 +693,7 @@ async fn api_run_suite(
         let result_dir = result_dir_for_run(Path::new(&request.auto_root), &run_id_clone)
             .map(|path| path.display().to_string())
             .unwrap_or_default();
+        let result_zip = first_zip(Path::new(&result_dir)).and_then(|path| path.file_name().map(|name| name.to_string_lossy().to_string()));
         let summary = log_file.map(|lf| parse_summary(&lf, "Test", &busy_serials.join(","), &run_id_clone, &request.test_type));
 
         let finished_payload = RunFinished {
@@ -1151,23 +1156,27 @@ async fn api_get_status() -> axum::response::Json<serde_json::Value> {
 }
 
 fn running_suite_statuses(registry: &BusyRegistry) -> Vec<serde_json::Value> {
-    let mut grouped: HashMap<(String, String), (String, u64, Vec<String>)> = HashMap::new();
+    let mut grouped: HashMap<(String, String), (String, u64, Vec<String>, Option<String>)> = HashMap::new();
     for device in registry.devices.values() {
         for (suite, detail) in &device.suite_statuses {
             let key = (device.run_id.clone(), suite.clone());
-            let entry = grouped.entry(key).or_insert_with(|| (detail.status.clone(), detail.elapsed_secs, Vec::new()));
+            let entry = grouped.entry(key).or_insert_with(|| (detail.status.clone(), detail.elapsed_secs, Vec::new(), detail.zip_file.clone()));
             entry.0 = detail.status.clone();
             entry.1 = entry.1.max(detail.elapsed_secs);
             entry.2.push(device.serial.clone());
+            if detail.zip_file.is_some() {
+                entry.3 = detail.zip_file.clone();
+            }
         }
     }
-    grouped.into_iter().map(|((run_id, suite), (status, elapsed_secs, devices))| {
+    grouped.into_iter().map(|((run_id, suite), (status, elapsed_secs, devices, zip_file))| {
         serde_json::json!({
             "run_id": run_id,
             "suite": suite,
             "status": status,
             "elapsed_secs": elapsed_secs,
             "devices": devices,
+            "zip_file": zip_file,
         })
     }).collect()
 }
@@ -1588,19 +1597,80 @@ fn ensure_ghidra_for_sts(app: &AppHandle) -> Result<(), String> {
 }
 
 fn prepare_ghidra_for_sts() -> Result<String, String> {
+    let _guard = GHIDRA_PREP_LOCK
+        .get_or_init(|| Mutex::new(()))
+        .lock()
+        .map_err(|err| format!("Ghidra preparation lock failed: {err}"))?;
     let updater = Path::new("/home/endri-pro/Documents/ghidra/download_ghidra.sh");
     if !updater.is_file() {
         return Err(format!("Ghidra updater not found: {}", updater.display()));
     }
-    let output = Command::new("bash")
-        .arg(updater)
-        .output()
-        .map_err(|err| format!("Cannot start Ghidra updater: {err}"))?;
+    let run_updater = || {
+        Command::new("bash")
+            .arg(updater)
+            .output()
+            .map_err(|err| format!("Cannot start Ghidra updater: {err}"))
+    };
+    let output = run_updater()?;
     if !output.status.success() {
         let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
         return Err(format!("Ghidra updater failed{}", if detail.is_empty() { String::new() } else { format!(": {detail}") }));
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    let target = Path::new("/tmp/tradefed_ghidra");
+    let archive = || WalkDir::new(target)
+        .min_depth(2)
+        .max_depth(2)
+        .into_iter()
+        .flatten()
+        .find(|entry| entry.file_type().is_file() && is_zip_file(entry.path()))
+        .map(|entry| entry.path().to_path_buf());
+    let valid = |path: &Path| Command::new("unzip")
+        .args(["-t", &path.display().to_string()])
+        .output()
+        .map(|result| result.status.success())
+        .unwrap_or(false);
+    let seed_cache = |source: &Path| -> Result<(), String> {
+        let name = source
+            .file_name()
+            .and_then(|value| value.to_str())
+            .ok_or_else(|| "Invalid Ghidra archive name".to_string())?;
+        let version = name
+            .strip_prefix("ghidra_")
+            .and_then(|value| value.split_once("_PUBLIC"))
+            .map(|(value, _)| value)
+            .ok_or_else(|| format!("Cannot derive Ghidra version from {name}"))?;
+        let cache = Path::new("/tmp/ghidra_cache/https:/github.com/NationalSecurityAgency/ghidra/releases/download")
+            .join(format!("Ghidra_{version}_build"))
+            .join(name);
+        let parent = cache.parent().ok_or_else(|| "Invalid Ghidra cache path".to_string())?;
+        fs::create_dir_all(parent).map_err(|err| format!("Cannot create Ghidra cache: {err}"))?;
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|value| value.as_nanos())
+            .unwrap_or_default();
+        let temp = cache.with_file_name(format!(".{name}.{nonce}.tmp"));
+        fs::copy(source, &temp).map_err(|err| format!("Cannot seed Ghidra cache: {err}"))?;
+        fs::rename(temp, cache).map_err(|err| format!("Cannot activate Ghidra cache: {err}"))
+    };
+    let path = archive();
+    if path.as_deref().is_some_and(valid) {
+        seed_cache(path.as_deref().unwrap())?;
+        return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
+    }
+    if let Some(path) = path {
+        let _ = fs::remove_file(path);
+    }
+    let retry = run_updater()?;
+    if !retry.status.success() {
+        return Err("Ghidra updater produced an invalid ZIP and retry failed".to_string());
+    }
+    let path = archive().filter(|path| valid(path));
+    if let Some(path) = path {
+        seed_cache(&path)?;
+        Ok(String::from_utf8_lossy(&retry.stdout).trim().to_string())
+    } else {
+        Err("Ghidra updater produced an invalid ZIP".to_string())
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -2110,7 +2180,7 @@ fn run_laundry_retries(
         let result_snapshot = ResultSnapshot::capture(&suite_workspace.join("results"));
         emit_laundry_result_update(app, source_root, source, run_id, test_type, suite, "Running", 0, None);
         let outcome = run_suite_process(app, suite, devices, &executable, &suite_workspace, &cmd, suite != "STS", &log_file, timeout_secs, run_id, test_type, true)?;
-        copy_laundry_retry_artifact(app, session_dir, suite, &suite_workspace, &target, &result_snapshot, copy_started, model, pda, devices, index + 1)?;
+        copy_laundry_retry_artifact(app, root, session_dir, suite, &suite_workspace, &target, &result_snapshot, copy_started, model, pda, devices, index + 1)?;
         let summary = parse_summary(&log_file, suite, &devices.join(","), run_id, test_type);
         emit_laundry_result_update(
             app,
@@ -2130,6 +2200,7 @@ fn run_laundry_retries(
 
 fn copy_laundry_retry_artifact(
     app: &AppHandle,
+    root: &Path,
     session_dir: &Path,
     suite: &str,
     suite_root: &Path,
@@ -2150,7 +2221,7 @@ fn copy_laundry_retry_artifact(
         });
     let Some(zip) = zip else {
         emit_log(app, format!("[{suite}] No zip found after retry in {}", result_dir.display()));
-        return Ok(());
+        return Err(format!("{suite} completed without a result ZIP: {}", result_dir.display()));
     };
     let result_name = result_dir
         .file_name()
@@ -2167,6 +2238,9 @@ fn copy_laundry_retry_artifact(
     ));
     fs::copy(&zip, &dst)
         .map_err(|err| format!("Cannot copy {} to {}: {err}", zip.display(), dst.display()))?;
+    if let Some(name) = dst.file_name().and_then(|value| value.to_str()) {
+        update_busy_device_zip(root, suite, devices, name);
+    }
     emit_log(app, format!("[{suite}] Retry result copied: {}", dst.display()));
     Ok(())
 }
@@ -2496,6 +2570,15 @@ fn run_suite_process(
         let lock = GTS_RUN_LOCK.get_or_init(|| Mutex::new(()));
         if lock.try_lock().is_err() {
             emit_log(app, "[runner] GTS: waiting for another GTS run to finish.");
+        }
+        Some(lock.lock().unwrap_or_else(|err| err.into_inner()))
+    } else {
+        None
+    };
+    let _sts_guard = if suite == "STS" {
+        let lock = STS_RUN_LOCK.get_or_init(|| Mutex::new(()));
+        if lock.try_lock().is_err() {
+            emit_log(app, "[runner] STS: waiting for another STS run to finish (shared Ghidra temp directory).");
         }
         Some(lock.lock().unwrap_or_else(|err| err.into_inner()))
     } else {
@@ -3841,10 +3924,9 @@ fn update_busy_device_suite(root: &std::path::Path, run_id: &str, suite: &str, s
     for device in busy.devices.values_mut() {
         if device.run_id == run_id && serials.contains(device.serial.as_str()) {
             device.current_suite = Some(suite.to_string());
-            device.suite_statuses.insert(suite.to_string(), SuiteRuntimeStatus {
-                status: status.to_string(),
-                elapsed_secs,
-            });
+            let detail = device.suite_statuses.entry(suite.to_string()).or_default();
+            detail.status = status.to_string();
+            detail.elapsed_secs = elapsed_secs;
         }
     }
     let _ = write_busy_registry(root, &busy);
@@ -3856,6 +3938,19 @@ fn update_busy_device_result_dir(root: &std::path::Path, run_id: &str, result_di
     for device in busy.devices.values_mut() {
         if device.run_id == run_id {
             device.result_dir = Some(result_dir.to_string());
+        }
+    }
+    let _ = write_busy_registry(root, &busy);
+}
+
+fn update_busy_device_zip(root: &Path, suite: &str, serials: &[String], zip_file: &str) {
+    let _guard = BUSY_REGISTRY_LOCK.get_or_init(|| Mutex::new(())).lock().ok();
+    let mut busy = read_busy_registry(root);
+    for device in busy.devices.values_mut() {
+        if serials.contains(&device.serial) {
+            if let Some(detail) = device.suite_statuses.get_mut(suite) {
+                detail.zip_file = Some(zip_file.to_string());
+            }
         }
     }
     let _ = write_busy_registry(root, &busy);
