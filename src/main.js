@@ -102,12 +102,21 @@ app.innerHTML = `
           <p>AI Worker</p>
         </div>
       </div>
-      <button class="icon-button settings-button" id="settingsBtn" title="Settings" aria-label="Settings">
+      <div class="titlebar-actions">
+        <div class="overall-progress" id="overallProgress" title="Overall run progress" aria-label="Overall run progress">
+          <svg viewBox="0 0 36 36" aria-hidden="true">
+            <circle class="overall-progress__bg" cx="18" cy="18" r="15"></circle>
+            <circle class="overall-progress__value" id="overallProgressCircle" cx="18" cy="18" r="15"></circle>
+          </svg>
+          <span id="overallProgressText">0%</span>
+        </div>
+        <button class="icon-button settings-button" id="settingsBtn" title="Settings" aria-label="Settings">
         <svg viewBox="0 0 24 24" aria-hidden="true">
           <path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"></path>
           <path d="M19.4 15a1.8 1.8 0 0 0 .36 1.98l.04.04a2 2 0 0 1-2.82 2.82l-.04-.04A1.8 1.8 0 0 0 15 19.44a1.8 1.8 0 0 0-1 .56 1.8 1.8 0 0 0-.52 1.28V21.4a2 2 0 0 1-4 0v-.08A1.8 1.8 0 0 0 8 19.44a1.8 1.8 0 0 0-1.98.36l-.04.04a2 2 0 0 1-2.82-2.82l.04-.04A1.8 1.8 0 0 0 3.56 15a1.8 1.8 0 0 0-.56-1 1.8 1.8 0 0 0-1.28-.52H1.6a2 2 0 0 1 0-4h.08A1.8 1.8 0 0 0 3.56 8a1.8 1.8 0 0 0-.36-1.98l-.04-.04a2 2 0 0 1 2.82-2.82l.04.04A1.8 1.8 0 0 0 8 3.56a1.8 1.8 0 0 0 1-.56 1.8 1.8 0 0 0 .52-1.28V1.6a2 2 0 0 1 4 0v.08A1.8 1.8 0 0 0 15 3.56a1.8 1.8 0 0 0 1.98-.36l.04-.04a2 2 0 0 1 2.82 2.82l-.04.04A1.8 1.8 0 0 0 19.44 8a1.8 1.8 0 0 0 .56 1 1.8 1.8 0 0 0 1.28.52h.12a2 2 0 0 1 0 4h-.08A1.8 1.8 0 0 0 19.4 15Z"></path>
         </svg>
-      </button>
+        </button>
+      </div>
     </header>
 
     <aside class="devices-pane">
@@ -284,6 +293,9 @@ const els = {
   unselectBtn: document.querySelector("#unselectBtn"),
   resetBusyBtn: document.querySelector("#resetBusyBtn"),
   refreshBtn: document.querySelector("#refreshBtn"),
+  overallProgress: document.querySelector("#overallProgress"),
+  overallProgressCircle: document.querySelector("#overallProgressCircle"),
+  overallProgressText: document.querySelector("#overallProgressText"),
   settingsBtn: document.querySelector("#settingsBtn"),
   settingsModal: document.querySelector("#settingsModal"),
   settingsCloseBtn: document.querySelector("#settingsCloseBtn"),
@@ -1109,6 +1121,24 @@ function updateLaundryRow(row, payload) {
 
 function renderSuiteStatus() {
   const statuses = [...state.suiteStatuses.values()];
+  let progressStatuses = [];
+  if (statuses.length > 0) {
+    const activeStatuses = statuses.filter((s) => state.activeRuns.has(s.run_id));
+    if (activeStatuses.length > 0) {
+      progressStatuses = activeStatuses;
+    } else {
+      const runIds = [];
+      statuses.forEach((s) => {
+        const id = s.run_id || "legacy";
+        if (!runIds.includes(id)) {
+          runIds.push(id);
+        }
+      });
+      const latestRunId = runIds[runIds.length - 1];
+      progressStatuses = statuses.filter((s) => (s.run_id || "legacy") === latestRunId);
+    }
+  }
+  renderOverallProgress(progressStatuses);
   if (!statuses.length) {
     els.suiteList.innerHTML = `<div class="empty">No active suite.</div>`;
     return;
@@ -1188,6 +1218,20 @@ function renderSuiteStatus() {
   els.suiteList.querySelectorAll("[data-close-suite]").forEach((button) => {
       button.addEventListener("click", () => closeSuiteRun(button.dataset.closeSuite));
   });
+}
+
+function renderOverallProgress(statuses) {
+  const doneStatuses = new Set(["Test Done", "Cancelled", "Failed", "Timeout", "Completed"]);
+  const total = statuses.length;
+  const done = statuses.filter((status) => doneStatuses.has(status.status)).length;
+  const pct = total ? Math.round((done / total) * 100) : 0;
+  const circumference = 2 * Math.PI * 15;
+  els.overallProgressCircle.style.strokeDasharray = circumference;
+  els.overallProgressCircle.style.strokeDashoffset = circumference * (1 - pct / 100);
+  els.overallProgressCircle.style.stroke = total && done === total ? "var(--green)" : "var(--cyan)";
+  els.overallProgressText.textContent = `${pct}%`;
+  els.overallProgress.title = total ? `Overall run progress: ${done}/${total} suites` : "Overall run progress: no suites";
+  els.overallProgress.setAttribute("aria-label", els.overallProgress.title);
 }
 
 function compareSuiteStatuses(a, b) {
@@ -1653,19 +1697,29 @@ function clearLocalBusy(serials) {
   renderDevices();
 }
 
-async function emergencyStop(reason = "Emergency stop") {
-  appendLog(`[runner] ${reason}: stopping all test processes.`);
+async function emergencyStop(reason = "Emergency stop", runId = null) {
+  appendLog(`[runner] ${reason}: stopping ${runId ? `run ${runId}` : "all test processes"}.`);
   els.cancelBtn.disabled = true;
   els.statusLine.textContent = "Emergency stop";
   try {
-    await invoke("cancel_run", { runId: null });
-    await invoke("reset_busy_state", { autoRoot: state.autoRoot || null });
-    state.activeRuns.clear();
-    state.runDevices.clear();
-    state.localBusy.clear();
-    state.completedDevices.clear();
-    state.selected.clear();
-    state.running = false;
+    await invoke("cancel_run", { runId });
+    const serials = runId
+      ? (state.runDevices.get(runId) || [])
+      : [...state.runDevices.values()].flat();
+    if (runId) {
+      state.activeRuns.delete(runId);
+      state.runDevices.delete(runId);
+    } else {
+      await invoke("reset_busy_state", { autoRoot: state.autoRoot || null });
+      state.activeRuns.clear();
+      state.runDevices.clear();
+      state.localBusy.clear();
+      state.completedDevices.clear();
+      state.selected.clear();
+    }
+    clearLocalBusy(serials);
+    state.running = state.activeRuns.size > 0;
+    els.cancelBtn.disabled = state.activeRuns.size === 0;
     await refreshDevices();
   } catch (error) {
     appendLog(`[runner] Emergency stop failed: ${error}`);
@@ -2067,7 +2121,7 @@ function clearInactiveSuites() {
 
 async function closeSuiteRun(runId) {
   if (!runId) return;
-  if (state.activeRuns.has(runId)) await emergencyStop(`Closing suite ${runId}`);
+  if (state.activeRuns.has(runId)) await emergencyStop(`Closing suite ${runId}`, runId);
   for (const [key, status] of [...state.suiteStatuses.entries()]) {
     if ((status.run_id || "legacy") === runId) state.suiteStatuses.delete(key);
   }

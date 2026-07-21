@@ -53,6 +53,48 @@ input {
   background: var(--panel);
 }
 
+.titlebar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.overall-progress {
+  position: relative;
+  width: 42px;
+  height: 42px;
+  color: var(--cyan);
+  font-size: 9px;
+  font-weight: 900;
+}
+
+.overall-progress svg {
+  width: 100%;
+  height: 100%;
+  transform: rotate(-90deg);
+}
+
+.overall-progress circle {
+  fill: none;
+  stroke-width: 3;
+}
+
+.overall-progress__bg {
+  stroke: rgba(255, 255, 255, 0.12);
+}
+
+.overall-progress__value {
+  stroke-linecap: round;
+  transition: stroke-dashoffset 180ms ease, stroke 180ms ease;
+}
+
+.overall-progress span {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+}
+
 .brand {
   display: flex;
   align-items: center;

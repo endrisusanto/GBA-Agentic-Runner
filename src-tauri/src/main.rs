@@ -25,8 +25,6 @@ use axum::{
 use tokio::net::TcpListener;
 
 const DEVICE_RECONNECT_TIMEOUT_SECS: u64 = 300;
-// ponytail: serialize GTS tradefed to protect the shared ADB server; shard/process parallelism can be added if ADB isolation is available.
-static GTS_RUN_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 static GHIDRA_PREP_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 // ponytail: serialize STS because Tradefed GhidraPreparer shares /tmp/tradefed_ghidra; isolate temp dirs if parallel STS is needed.
 static STS_RUN_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
@@ -522,6 +520,7 @@ fn run_suite(
     thread::spawn(move || {
         let busy_serials = selected_serials(&request);
         let result = run_suite_blocking(app.clone(), root, request.clone(), run_id.clone());
+
         let exit_code = match result {
             Ok(code) => code,
             Err(err) => {
@@ -661,6 +660,7 @@ async fn api_run_suite(
     thread::spawn(move || {
         let busy_serials = selected_serials(&request);
         let result = run_suite_blocking(app.clone(), root, request.clone(), run_id_clone.clone());
+
         let exit_code = match result {
             Ok(code) => code,
             Err(err) => {
@@ -1210,40 +1210,62 @@ async fn api_screenshot(
 
 #[tauri::command]
 fn cancel_run(app: AppHandle, run_state: State<'_, RunState>, run_id: Option<String>) -> Result<(), String> {
-    let pids: Vec<u32> = {
+    let (pids, target_serials, root) = {
         let active = run_state.active.lock().map_err(|err| err.to_string())?;
         if !active.running {
             emit_log(&app, "[runner] No active run to cancel.");
             return Ok(());
         }
-        if let Some(target) = run_id {
-            active.pids.iter().filter(|(r, _)| r == &target).map(|(_, p)| *p).collect()
+        let root = active.root.clone();
+        let target_serials = match run_id.as_deref() {
+            Some(target) => root
+                .as_deref()
+                .map(read_busy_registry)
+                .map(|registry| registry.devices.values()
+                    .filter(|device| device.run_id == target)
+                    .map(|device| device.serial.clone())
+                    .collect::<Vec<_>>())
+                .unwrap_or_default(),
+            None => active.busy_serials.clone(),
+        };
+        let pids: Vec<u32> = if let Some(target) = run_id.as_deref() {
+            active.pids.iter().filter(|(r, _)| r == target).map(|(_, p)| *p).collect()
         } else {
             active.pids.iter().map(|(_, p)| *p).collect()
-        }
+        };
+        (pids, target_serials, root)
     };
 
     emit_log(&app, format!("[runner] Terminating {} process(es).", pids.len()));
-    for pid in pids {
-        terminate_process_tree(pid);
+    for pid in &pids {
+        terminate_process_tree(*pid);
     }
     if let Ok(mut active) = run_state.active.lock() {
-        if let Some(root) = active.root.clone() {
-            clear_busy_devices(&root, &active.busy_serials);
+        if let Some(root) = root {
+            clear_busy_devices(&root, &target_serials);
         }
-        active.running = false;
-        active.pids.clear();
-        active.root = None;
-        active.busy_serials.clear();
+        if run_id.is_some() {
+            active.pids.retain(|(_, pid)| !pids.contains(pid));
+            active.busy_serials.retain(|serial| !target_serials.contains(serial));
+            active.running = !active.busy_serials.is_empty() || !active.pids.is_empty();
+            if !active.running {
+                active.root = None;
+            }
+        } else {
+            active.running = false;
+            active.pids.clear();
+            active.root = None;
+            active.busy_serials.clear();
+        }
     }
     let _ = app.emit(
         "gba-suite-status",
         SuiteStatus {
-            run_id: "cancel".to_string(),
+            run_id: run_id.unwrap_or_else(|| "cancel".to_string()),
             test_type: "ALL".to_string(),
             suite: "ALL".to_string(),
             status: "Cancelled".to_string(),
-            devices: String::new(),
+            devices: target_serials.join(","),
             elapsed_secs: 0,
             log_file: String::new(),
         },
@@ -1332,6 +1354,20 @@ fn open_scrcpy(serial: String) -> Result<(), String> {
 }
 
 fn run_suite_blocking(app: AppHandle, root: PathBuf, request: RunSuiteRequest, run_id: String) -> Result<i32, String> {
+    {
+        let lock = ADB_START_LOCK.get_or_init(|| Mutex::new(()));
+        let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+        let is_running = Command::new(adb_path())
+            .arg("devices")
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !is_running {
+            let _ = Command::new(adb_path()).arg("start-server").status();
+            thread::sleep(Duration::from_millis(500));
+        }
+    }
+    let _ = create_adb_wrapper(&root);
     set_current_run_id(Some(run_id.clone()));
     fs::create_dir_all(root.join("Results")).map_err(|err| err.to_string())?;
 
@@ -1386,6 +1422,8 @@ fn run_suite_blocking(app: AppHandle, root: PathBuf, request: RunSuiteRequest, r
     register_log_file(&app, &run_log);
     
     emit_log(&app, format!("[runner] Result directory: {}", session_dir.display()));
+
+    emit_log(&app, "[runner] Using shared ADB server.");
 
     if request.wifi_enabled {
         emit_log(&app, "[wifi] Auto connect enabled.");
@@ -1605,17 +1643,7 @@ fn prepare_ghidra_for_sts() -> Result<String, String> {
     if !updater.is_file() {
         return Err(format!("Ghidra updater not found: {}", updater.display()));
     }
-    let run_updater = || {
-        Command::new("bash")
-            .arg(updater)
-            .output()
-            .map_err(|err| format!("Cannot start Ghidra updater: {err}"))
-    };
-    let output = run_updater()?;
-    if !output.status.success() {
-        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(format!("Ghidra updater failed{}", if detail.is_empty() { String::new() } else { format!(": {detail}") }));
-    }
+    let output = run_ghidra_updater(updater)?;
     let target = Path::new("/tmp/tradefed_ghidra");
     let archive = || WalkDir::new(target)
         .min_depth(2)
@@ -1652,25 +1680,58 @@ fn prepare_ghidra_for_sts() -> Result<String, String> {
         fs::copy(source, &temp).map_err(|err| format!("Cannot seed Ghidra cache: {err}"))?;
         fs::rename(temp, cache).map_err(|err| format!("Cannot activate Ghidra cache: {err}"))
     };
-    let path = archive();
-    if path.as_deref().is_some_and(valid) {
-        seed_cache(path.as_deref().unwrap())?;
+    let cached_archive = || WalkDir::new("/tmp/ghidra_cache")
+        .into_iter()
+        .flatten()
+        .find(|entry| entry.file_type().is_file() && is_zip_file(entry.path()) && valid(entry.path()))
+        .map(|entry| entry.path().to_path_buf());
+    if let Some(path) = archive().filter(|path| valid(path)) {
+        if let Err(err) = seed_cache(&path) {
+            if let Some(cached) = cached_archive() {
+                return Ok(format!("Ghidra cache ready: {}", cached.display()));
+            }
+            return Err(err);
+        }
         return Ok(String::from_utf8_lossy(&output.stdout).trim().to_string());
     }
-    if let Some(path) = path {
-        let _ = fs::remove_file(path);
+    if let Some(path) = cached_archive() {
+        return Ok(format!("Ghidra cache ready: {}", path.display()));
     }
-    let retry = run_updater()?;
-    if !retry.status.success() {
-        return Err("Ghidra updater produced an invalid ZIP and retry failed".to_string());
+    Err("Ghidra updater produced no valid ZIP or cache".to_string())
+}
+
+fn run_ghidra_updater(updater: &Path) -> Result<std::process::Output, String> {
+    let mut last_error = String::new();
+    for attempt in 1..=3 {
+        let mut child = Command::new("bash")
+            .arg(updater)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|err| format!("Cannot start Ghidra updater: {err}"))?;
+        let started = Instant::now();
+        loop {
+            if child.try_wait().map_err(|err| format!("Cannot poll Ghidra updater: {err}"))?.is_some() {
+                let output = child.wait_with_output().map_err(|err| format!("Cannot read Ghidra updater: {err}"))?;
+                if output.status.success() {
+                    return Ok(output);
+                }
+                last_error = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                break;
+            }
+            if started.elapsed() >= Duration::from_secs(120) {
+                let _ = child.kill();
+                let _ = child.wait();
+                last_error = "timed out after 120 seconds".to_string();
+                break;
+            }
+            thread::sleep(Duration::from_secs(1));
+        }
+        if attempt < 3 {
+            thread::sleep(Duration::from_secs(2));
+        }
     }
-    let path = archive().filter(|path| valid(path));
-    if let Some(path) = path {
-        seed_cache(&path)?;
-        Ok(String::from_utf8_lossy(&retry.stdout).trim().to_string())
-    } else {
-        Err("Ghidra updater produced an invalid ZIP".to_string())
-    }
+    Err(format!("Ghidra updater failed after 3 attempts{}", if last_error.is_empty() { String::new() } else { format!(": {last_error}") }))
 }
 
 #[derive(Debug, Clone)]
@@ -1905,6 +1966,35 @@ fn extract_nested_zips(dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn is_scat_result_zip(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+        return false;
+    };
+    let name = name.to_ascii_lowercase();
+    name.strip_prefix("scat_result_")
+        .and_then(|value| value.strip_suffix(".zip"))
+        .is_some_and(|value| value.contains("_scat_"))
+}
+
+fn copy_laundry_result_zips(app: &AppHandle, source_root: &Path, session_dir: &Path) -> Result<(), String> {
+    let mut copied = 0;
+    for entry in WalkDir::new(source_root).into_iter().flatten() {
+        if !entry.file_type().is_file()
+            || !is_scat_result_zip(entry.path())
+        {
+            continue;
+        }
+        let name = entry.path().file_name().ok_or_else(|| "SCAT result ZIP has no filename".to_string())?;
+        let dst = session_dir.join(name);
+        fs::copy(entry.path(), &dst)
+            .map_err(|err| format!("Cannot preserve laundry result ZIP {}: {err}", entry.path().display()))?;
+        copied += 1;
+        emit_log(app, format!("[runner] Laundry source result ZIP preserved: {}", dst.display()));
+    }
+    emit_log(app, format!("[runner] Preserved {copied} laundry source result ZIP(s)."));
+    Ok(())
+}
+
 fn prepare_laundry_source(app: &AppHandle, request: &RunSuiteRequest, session_dir: &Path) -> Result<LaundrySource, String> {
     let zip_path = request
         .laundry_zip_path
@@ -1924,6 +2014,8 @@ fn prepare_laundry_source(app: &AppHandle, request: &RunSuiteRequest, session_di
     );
     emit_log(app, format!("[runner] Extracting zip to {}", temp.path().display()));
     extract_zip_safe(&zip_path, temp.path())?;
+
+    copy_laundry_result_zips(app, temp.path(), session_dir)?;
     
     emit_log(app, "[runner] Checking and extracting any nested zip files...");
     extract_nested_zips(temp.path())?;
@@ -2563,18 +2655,9 @@ fn run_suite_process(
     if publish_status {
         emit_status(app, suite, "Waiting", &devices_text, 0, log_file, run_id, test_type);
     }
-    emit_log(app, format!("[runner] {suite}: queued for shared ADB slot ({devices_text})"));
+    emit_log(app, format!("[runner] {suite}: queued for isolated ADB slot ({devices_text})"));
     write_log_header(log_file, suite, suite_command)?;
 
-    let _gts_guard = if suite == "GTS" {
-        let lock = GTS_RUN_LOCK.get_or_init(|| Mutex::new(()));
-        if lock.try_lock().is_err() {
-            emit_log(app, "[runner] GTS: waiting for another GTS run to finish.");
-        }
-        Some(lock.lock().unwrap_or_else(|err| err.into_inner()))
-    } else {
-        None
-    };
     let _sts_guard = if suite == "STS" {
         let lock = STS_RUN_LOCK.get_or_init(|| Mutex::new(()));
         if lock.try_lock().is_err() {
@@ -2597,12 +2680,17 @@ fn run_suite_process(
     let executable_dir = executable
         .parent()
         .ok_or_else(|| format!("Invalid executable parent: {}", executable.display()))?;
-
     let mut command = Command::new(format!("./{executable_name}"));
     command
         .current_dir(executable_dir)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Ok(root) = resolve_auto_root(None) {
+        let gba_bin = root.join(".gba-bin");
+        if let Ok(current_path) = std::env::var("PATH") {
+            command.env("PATH", format!("{}:{current_path}", gba_bin.display()));
+        }
+    }
     if via_pipe {
         command.stdin(Stdio::piped());
     } else {
@@ -2776,7 +2864,7 @@ fn disconnected_devices(devices: &[String]) -> Vec<String> {
 }
 
 fn adb_device_state(serial: &str) -> Result<String, String> {
-    adb_device_output(serial, &["get-state"]).map(|state| {
+    run_output(Command::new(adb_path()).arg("-s").arg(serial).arg("get-state")).map(|state| {
         if state.trim().is_empty() {
             "unknown".to_string()
         } else {
@@ -3014,8 +3102,9 @@ fn same_suite_os_version(left: &str, right: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{same_suite_os_version, suite_workspace};
+    use super::{is_scat_result_zip, same_suite_os_version, suite_workspace};
     use std::fs;
+    use std::path::Path;
 
     #[cfg(unix)]
     #[test]
@@ -3043,6 +3132,15 @@ mod tests {
         assert!(same_suite_os_version("16_r4", "16_r5"));
         assert!(same_suite_os_version("16.1_r3", "16.1_r4"));
         assert!(!same_suite_os_version("16_r5", "16.1_r3"));
+    }
+
+    #[test]
+    fn only_scat_result_zips_are_preserved() {
+        assert!(is_scat_result_zip(Path::new(
+            "scat_result_3099426_2026-07-17_09-23-32_scat_5951373262979072.zip",
+        )));
+        assert!(!is_scat_result_zip(Path::new("laundry_result.zip")));
+        assert!(!is_scat_result_zip(Path::new("scat_result_123.zip")));
     }
 }
 
@@ -3562,18 +3660,23 @@ fn prepare_devices(app: &AppHandle, devices: &[String]) {
         let app_prepare = app.clone();
         handles.push(thread::spawn(move || {
             emit_log(&app_prepare, format!("[prepare][{serial}] waking device"));
-            let _ = adb_device_output(&serial, &["root"]);
+            let run = |args: &[&str]| {
+                adb_device_output_timeout(&serial, args, Duration::from_secs(30))
+            };
+            let _ = run(&["root"]);
             thread::sleep(Duration::from_secs(1));
-            let _ = adb_device_output(&serial, &["unroot"]);
-            let _ = adb_device_output(&serial, &["wait-for-device"]);
-            let _ = adb_device_output(
-                &serial,
+            let _ = run(&["unroot"]);
+            let _ = run(&["wait-for-device"]);
+            let result = run(
                 &[
                     "shell",
-                    "settings put global stay_on_while_plugged_in 3; wm dismiss-keyguard; input keyevent KEYCODE_WAKEUP; input keyevent KEYCODE_HOME",
+                    "settings put global stay_on_while_plugged_in 3; settings put secure block_usb_lock 0; wm dismiss-keyguard; input keyevent KEYCODE_WAKEUP; input keyevent KEYCODE_HOME",
                 ],
             );
-            emit_log(&app_prepare, format!("[prepare][{serial}] ready"));
+            match result {
+                Ok(_) => emit_log(&app_prepare, format!("[prepare][{serial}] ready")),
+                Err(err) => emit_log(&app_prepare, format!("[prepare][{serial}] skipped: {err}")),
+            }
         }));
     }
     for handle in handles {
@@ -3646,6 +3749,7 @@ thread_local! {
 }
 
 static BUSY_REGISTRY_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+static ADB_START_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
 fn suite_workspace(root: &Path, suite_root: &Path, run_id: &str) -> Result<PathBuf, String> {
     #[cfg(unix)]
@@ -4041,6 +4145,20 @@ fn adb_device_output(serial: &str, args: &[&str]) -> Result<String, String> {
     run_output(Command::new(adb_path()).arg("-s").arg(serial).args(args))
 }
 
+fn adb_device_output_timeout(
+    serial: &str,
+    args: &[&str],
+    timeout: Duration,
+) -> Result<String, String> {
+    run_output_timeout(
+        Command::new(adb_path())
+            .arg("-s")
+            .arg(serial)
+            .args(args),
+        timeout,
+    )
+}
+
 fn device_ip(serial: &str) -> Result<String, String> {
     let output = adb_device_output(serial, &["shell", "ip", "-f", "inet", "addr", "show", "wlan0"])?;
     for part in output.split_whitespace() {
@@ -4309,6 +4427,30 @@ fn adb_path() -> String {
     env::var("ADB").unwrap_or_else(|_| "adb".to_string())
 }
 
+// ponytail: removed isolated ADB server per-run; shared default server is simpler and reliable
+
+fn create_adb_wrapper(root: &Path) -> Result<(), String> {
+    let gba_bin = root.join(".gba-bin");
+    fs::create_dir_all(&gba_bin).map_err(|err| err.to_string())?;
+    let real_adb = which(&adb_path())
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "/usr/bin/adb".to_string());
+    let wrapper_path = gba_bin.join("adb");
+    let content = format!(
+        "#!/usr/bin/env bash\nif [[ \"$*\" == *\"kill-server\"* ]]; then\n    exit 0\nfi\nexec {} \"$@\"\n",
+        real_adb
+    );
+    fs::write(&wrapper_path, content).map_err(|err| err.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&wrapper_path).map_err(|err| err.to_string())?.permissions();
+        perms.set_mode(0o755);
+        let _ = fs::set_permissions(&wrapper_path, perms);
+    }
+    Ok(())
+}
+
 fn resolve_auto_root(value: Option<String>) -> Result<PathBuf, String> {
     let configured = value
         .filter(|item| !item.trim().is_empty())
@@ -4337,6 +4479,33 @@ fn run_output(command: &mut Command) -> Result<String, String> {
         } else {
             Err(stderr)
         }
+    }
+}
+
+fn run_output_timeout(command: &mut Command, timeout: Duration) -> Result<String, String> {
+    let mut child = command.spawn().map_err(|err| err.to_string())?;
+    let started = Instant::now();
+    loop {
+        if child.try_wait().map_err(|err| err.to_string())?.is_some() {
+            break;
+        }
+        if started.elapsed() >= timeout {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(format!("timed out after {}s", timeout.as_secs()));
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    let output = child.wait_with_output().map_err(|err| err.to_string())?;
+    if output.status.success() {
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        Err(if stderr.is_empty() {
+            format!("Command failed with status {}", output.status)
+        } else {
+            stderr
+        })
     }
 }
 
@@ -4424,6 +4593,7 @@ fn main() {
         .plugin(tauri_plugin_dialog::init())
         .manage(RunState::default())
         .setup(|app| {
+            let _ = std::process::Command::new(adb_path()).arg("start-server").status();
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 start_api_server(handle).await;
