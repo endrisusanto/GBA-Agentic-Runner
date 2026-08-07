@@ -63,6 +63,10 @@ struct RunSuiteRequest {
     laundry_zip_path: Option<String>,
     #[serde(default)]
     selected_laundry_results: Vec<String>,
+    #[serde(default)]
+    selected_laundry_rows: Vec<serde_json::Value>,
+    #[serde(default)]
+    ui_log_lines: Vec<String>,
     user_devices: Vec<String>,
     userdebug_devices: Vec<String>,
     retry_count: u32,
@@ -192,6 +196,8 @@ struct BusyDevice {
     current_suite: Option<String>,
     #[serde(default)]
     suite_statuses: HashMap<String, SuiteRuntimeStatus>,
+    #[serde(default)]
+    session_pid: u32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -213,6 +219,14 @@ struct LogFlowOption {
     title: String,
     run_id: String,
     result_dir: Option<String>,
+    #[serde(default)]
+    session_pid: u32,
+    #[serde(default)]
+    test_type: String,
+    #[serde(default)]
+    devices: String,
+    #[serde(default)]
+    laundry_rows: Vec<serde_json::Value>,
 }
 
 #[derive(Default)]
@@ -465,18 +479,19 @@ fn check_laundry_mismatches(auto_root: String, zip_path: String) -> Result<Vec<S
                 let is_same_version = !local_folder_version.is_empty()
                     && normalized_version.as_deref() == Some(local_folder_version);
 
-                warnings.push(format!(
-                    "Mismatched tools version for {suite} (ignored: {ignored}):\n\
-                     Laundry file has version: {name} {version} ({build})\n\
-                     Local tool has version: ({local_version})\n\
-                     Please align laundry file and local tools.",
-                    suite = suite,
-                    ignored = is_same_version,
-                    name = name,
-                    version = version,
-                    build = build,
-                    local_version = local_version
-                ));
+                if !is_same_version {
+                    warnings.push(format!(
+                        "Mismatched tools version for {suite}:\n\
+                         Laundry file has version: {name} {version} ({build})\n\
+                         Local tool has version: ({local_version})\n\
+                         Please align laundry file and local tools.",
+                        suite = suite,
+                        name = name,
+                        version = version,
+                        build = build,
+                        local_version = local_version
+                    ));
+                }
             }
         }
     }
@@ -568,6 +583,8 @@ async fn start_api_server(app_handle: AppHandle) {
     
     let app = Router::new()
         .route("/api/run-suite", post(api_run_suite))
+        .route("/api/default-auto-root", get(api_default_auto_root))
+        .route("/api/browse", get(api_browse))
         .route("/api/devices", get(api_list_devices))
         .route("/api/preflight", post(api_preflight))
         .route("/api/cancel-run", post(api_cancel_run))
@@ -588,6 +605,49 @@ async fn start_api_server(app_handle: AppHandle) {
         println!("Local API server listening on 0.0.0.0:3030");
         let _ = axum::serve(listener, app).await;
     }
+}
+
+async fn api_default_auto_root() -> axum::response::Json<serde_json::Value> {
+    match default_auto_root() {
+        Ok(root) => axum::response::Json(serde_json::json!({ "result": root })),
+        Err(error) => axum::response::Json(serde_json::json!({ "error": error })),
+    }
+}
+
+#[derive(Deserialize)]
+struct BrowseParams {
+    path: String,
+    kind: Option<String>,
+}
+
+async fn api_browse(Query(params): Query<BrowseParams>) -> axum::response::Json<serde_json::Value> {
+    let path = PathBuf::from(&params.path);
+    let mut entries = Vec::new();
+    let kind = params.kind.as_deref().unwrap_or("folder");
+    let Ok(read_dir) = fs::read_dir(&path) else {
+        return axum::response::Json(serde_json::json!({ "error": format!("Cannot read {}", path.display()) }));
+    };
+    for entry in read_dir.flatten() {
+        let entry_path = entry.path();
+        let Ok(metadata) = entry.metadata() else { continue };
+        let is_dir = metadata.is_dir();
+        let is_zip = entry_path.extension().and_then(|ext| ext.to_str()).map(|ext| ext.eq_ignore_ascii_case("zip")).unwrap_or(false);
+        if kind == "zip" && !is_zip && !is_dir { continue; }
+        entries.push(serde_json::json!({
+            "name": entry.file_name().to_string_lossy(),
+            "path": entry_path.display().to_string(),
+            "is_dir": is_dir,
+            "size": metadata.len(),
+        }));
+    }
+    entries.sort_by(|a, b| {
+        b["is_dir"].as_bool().cmp(&a["is_dir"].as_bool()).then(a["name"].as_str().cmp(&b["name"].as_str()))
+    });
+    axum::response::Json(serde_json::json!({
+        "path": path.display().to_string(),
+        "parent": path.parent().map(|parent| parent.display().to_string()),
+        "entries": entries,
+    }))
 }
 
 async fn api_list_devices() -> axum::response::Json<Vec<DeviceInfo>> {
@@ -1060,6 +1120,10 @@ fn log_flow_options(root: &Path) -> Vec<LogFlowOption> {
                             title: format!("{} | {} | {}", test_type, model, pda),
                             run_id,
                             result_dir: Some(result_dir.display().to_string()),
+                            session_pid: 0,
+                            test_type: test_type.clone(),
+                            devices: String::new(),
+                            laundry_rows: Vec::new(),
                         });
                     }
                 }
@@ -1075,6 +1139,10 @@ fn log_flow_options(root: &Path) -> Vec<LogFlowOption> {
             ),
             run_id: device.run_id.clone(),
             result_dir: device.result_dir.clone(),
+            session_pid: device.session_pid,
+            test_type: device.test_type.clone(),
+            devices: device.serial.clone(),
+            laundry_rows: Vec::new(),
         });
         if !entry.title.ends_with(&format!("[{}]", device.serial)) {
             entry.title = entry.title.trim_end_matches(']').to_string();
@@ -1150,7 +1218,7 @@ async fn api_get_status() -> axum::response::Json<serde_json::Value> {
     axum::response::Json(serde_json::json!({
         "status": "IDLE",
         "running_devices": Vec::<BusyDevice>::new(),
-        "log_options": Vec::<LogFlowOption>::new(),
+        "log_options": log_flow_options(&root),
         "last_run": serde_json::Value::Null,
     }))
 }
@@ -1408,6 +1476,10 @@ fn run_suite_blocking(app: AppHandle, root: PathBuf, request: RunSuiteRequest, r
         ),
         run_id: run_id.clone(),
         result_dir: Some(session_dir.display().to_string()),
+        session_pid: std::process::id(),
+        test_type: request.test_type.clone(),
+        devices: all_devices.join(","),
+        laundry_rows: request.selected_laundry_rows.clone(),
     };
     let _ = fs::write(
         session_dir.join(".gba-flow.json"),
@@ -1420,6 +1492,9 @@ fn run_suite_blocking(app: AppHandle, root: PathBuf, request: RunSuiteRequest, r
     // Register run.log immediately so early errors are captured
     let run_log = session_dir.join("run.log");
     register_log_file(&app, &run_log);
+    for line in &request.ui_log_lines {
+        append_file_line(&run_log, line);
+    }
     
     emit_log(&app, format!("[runner] Result directory: {}", session_dir.display()));
 
@@ -1476,6 +1551,19 @@ fn run_suite_blocking(app: AppHandle, root: PathBuf, request: RunSuiteRequest, r
             exit_codes.push(outcome.exit_code);
         }
         "Laundry Normal" => {
+            let outcome = run_laundry_normal(
+                &app,
+                &root,
+                &session_dir,
+                &log_dir,
+                &request,
+                &model,
+                &pda,
+                &run_id,
+            )?;
+            exit_codes.push(outcome.exit_code);
+        }
+        "Laundry SKU" => {
             let outcome = run_laundry_normal(
                 &app,
                 &root,
@@ -1763,7 +1851,8 @@ fn run_laundry_normal(
     let devices = &request.user_devices;
     let source = prepare_laundry_source(app, request, session_dir)?;
     verify_laundry_suite_tools(app, root, devices, &source, &["GTS", "CTS"])?;
-    emit_log(app, "[runner] Laundry Normal: initial GTS property run.");
+    let label = if request.test_type == "Laundry SKU" { "Laundry SKU" } else { "Laundry Normal" };
+    emit_log(app, format!("[runner] {label}: initial GTS run."));
     let deviceinfo = run_laundry_initial_gts(
         app,
         root,
@@ -2418,7 +2507,9 @@ fn run_tradefed_console_command(
         let log_stdout = log_file.to_path_buf();
         let app_stdout = app.clone();
         let suite_stdout = suite.to_string();
+        let run_id_stdout = run_id.to_string();
         thread::spawn(move || {
+            set_current_run_id(Some(run_id_stdout));
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 append_file_line(&log_stdout, &line);
                 if let Ok(mut text) = out_buf.lock() {
@@ -2434,7 +2525,9 @@ fn run_tradefed_console_command(
         let log_stderr = log_file.to_path_buf();
         let app_stderr = app.clone();
         let suite_stderr = suite.to_string();
+        let run_id_stderr = run_id.to_string();
         thread::spawn(move || {
+            set_current_run_id(Some(run_id_stderr));
             for line in BufReader::new(stderr).lines().map_while(Result::ok) {
                 append_file_line(&log_stderr, &line);
                 if let Ok(mut text) = out_buf.lock() {
@@ -3798,6 +3891,7 @@ fn suite_workspace(root: &Path, suite_root: &Path, run_id: &str) -> Result<PathB
 #[derive(Clone, serde::Serialize)]
 struct LogPayload {
     run_id: Option<String>,
+    timestamp: String,
     line: String,
 }
 
@@ -3807,12 +3901,6 @@ pub fn set_current_run_id(run_id: Option<String>) {
 
 fn emit_log(app: &AppHandle, line: impl AsRef<str>) {
     let line = line.as_ref().replace("[runner]", "[AI Worker]");
-    let run_id = CURRENT_RUN_ID.with(|id| id.borrow().clone());
-    if let (Some(run_id), Ok(root)) = (run_id, resolve_auto_root(None)) {
-        if let Some(result_dir) = result_dir_for_run(&root, &run_id) {
-            append_file_line(&result_dir.join("run.log"), &line);
-        }
-    }
     emit_log_event(app, line);
 }
 
@@ -3825,11 +3913,29 @@ fn result_dir_for_run(root: &Path, run_id: &str) -> Option<PathBuf> {
 }
 
 fn emit_log_event(app: &AppHandle, line: impl Into<String>) {
+    let line = line.into();
     let run_id = CURRENT_RUN_ID.with(|id| id.borrow().clone());
+    let timestamp = log_timestamp();
+    if let (Some(run_id), Ok(root)) = (run_id.clone(), resolve_auto_root(None)) {
+        if let Some(result_dir) = result_dir_for_run(&root, &run_id) {
+            append_file_line(&result_dir.join("run.log"), &format!("{timestamp} {line}"));
+        }
+    }
     let _ = app.emit("gba-run-log", LogPayload {
         run_id,
-        line: line.into(),
+        timestamp,
+        line,
     });
+}
+
+fn log_timestamp() -> String {
+    Command::new("date")
+        .arg("+%H:%M:%S")
+        .output()
+        .ok()
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "00:00:00".to_string())
 }
 
 fn log_title_timestamp() -> String {
@@ -3921,10 +4027,13 @@ fn validate_request(request: &RunSuiteRequest) -> Result<(), String> {
         validate_laundry_smr_pair(request)?;
     }
     match request.test_type.as_str() {
-        "Laundry Normal" if request.user_devices.is_empty() => {
-            Err("Laundry Normal needs at least one non-userdebug device".to_string())
+        "Laundry Normal" | "Laundry SKU" if request.user_devices.is_empty() => {
+            Err(format!("{} needs at least one USER device", request.test_type))
         }
-        "Laundry Normal" | "Laundry SMR" if request.laundry_zip_path.as_ref().is_none_or(|path| path.trim().is_empty()) => {
+        "Laundry Normal" | "Laundry SKU" if !request.userdebug_devices.is_empty() => {
+            Err(format!("{} hanya boleh menggunakan device USER", request.test_type))
+        }
+        "Laundry Normal" | "Laundry SKU" | "Laundry SMR" if request.laundry_zip_path.as_ref().is_none_or(|path| path.trim().is_empty()) => {
             Err(format!("{} needs laundry zip file", request.test_type))
         }
         "Cuci SMR" | "MR" | "SKU" if request.user_devices.is_empty() => {
@@ -4087,6 +4196,7 @@ fn mark_busy_devices(root: &Path, request: &RunSuiteRequest, serials: &[String],
                 result_dir: None,
                 current_suite: Some("SOURCE".to_string()),
                 suite_statuses: HashMap::new(),
+                session_pid: std::process::id(),
             },
         );
     }

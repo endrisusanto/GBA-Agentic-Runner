@@ -1,8 +1,47 @@
-import { invoke } from "@tauri-apps/api/core";
+import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import "./styles.css";
 import agenticLogo from "./assets/agentic.png";
+
+const isTauri = Boolean(window.__TAURI_INTERNALS__);
+
+async function api(path, options = {}) {
+  const response = await fetch(path, {
+    headers: { "Content-Type": "application/json", ...(options.headers || {}) },
+    ...options,
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || data.error) throw new Error(data.error || response.statusText);
+  return data;
+}
+
+function hostApi(path, options) {
+  return api(isTauri ? `http://127.0.0.1:3030${path}` : path, options);
+}
+
+function invoke(command, args = {}) {
+  if (isTauri) return tauriInvoke(command, args);
+  const routes = {
+    default_auto_root: ["GET", "/api/default-auto-root"],
+    list_devices: ["GET", "/api/devices"],
+    preflight: ["POST", "/api/preflight", { auto_root: args.autoRoot ?? null }],
+    run_suite: ["POST", "/api/run-suite", args.request],
+    cancel_run: ["POST", "/api/cancel-run", args],
+    reset_busy_state: ["POST", "/api/reset-busy-state", args],
+    set_device_lamp: ["POST", "/api/set-device-lamp", args],
+    analyze_laundry_zip: ["POST", "/api/analyze-laundry-zip", { zip_path: args.zipPath }],
+    check_laundry_mismatches: ["POST", "/api/check-laundry-mismatches", { auto_root: args.autoRoot, zip_path: args.zipPath }],
+  };
+  if (!routes[command]) return Promise.reject(new Error(`${command} is only available in the desktop app`));
+  const [method, path, body] = routes[command];
+  return api(path, { method, ...(body === undefined ? {} : { body: JSON.stringify(body) }) })
+    .then((data) => data.result ?? data);
+}
+
+function subscribe(event, handler) {
+  if (isTauri) listen(event, handler);
+}
 
 const TEST_MODES = [
   {
@@ -18,6 +57,14 @@ const TEST_MODES = [
     name: "Laundry Normal",
     flow: "GTS property -> CTS/GTS retry",
     description: "Laundry Normal with property deviceinfo replacement.",
+    needs: "user",
+    laundry: true,
+  },
+  {
+    id: "Laundry SKU",
+    name: "Laundry SKU",
+    flow: "GTS property -> CTS/GTS retry",
+    description: "Laundry Normal flow with SKU output labeling.",
     needs: "user",
     laundry: true,
   },
@@ -81,13 +128,17 @@ const state = {
   suiteStatuses: new Map(),
   summaries: new Map(),
   resultDirs: new Map(),
+  browserLogCache: new Map(),
   resultDir: "",
+  picker: null,
   runStartedAt: null,
   runElapsedSecs: 0,
   runTableTab: "preview",
   laundryWarnings: [],
   preflightLines: [],
   manualSelection: false,
+  captureUiLogs: false,
+  pendingUiLogs: [],
 };
 
 const app = document.querySelector("#app");
@@ -241,7 +292,6 @@ app.innerHTML = `
           </label>
         </section>
         <div class="settings-actions">
-          <button class="ghost-button" id="defaultRootBtn">Default Root</button>
           <button class="ghost-button" id="preflightBtn">Check</button>
           <button class="run-button" id="settingsSaveBtn">Save</button>
         </div>
@@ -262,8 +312,45 @@ app.innerHTML = `
           <ul id="warningsList" style="list-style: none; padding: 0; margin: 0; font-family: var(--font-mono); font-size: 13px; color: var(--text-muted); line-height: 1.5; display: flex; flex-direction: column; gap: 8px; word-break: break-all; white-space: pre-wrap;"></ul>
         </div>
         <div class="settings-actions">
+          <button class="run-button hidden" id="warningsReopenBtn">Reopen</button>
           <button class="run-button" id="warningsOkBtn">OK</button>
         </div>
+      </section>
+    </div>
+
+    <div class="modal-backdrop hidden" id="filePickerModal">
+      <section class="settings-modal file-picker-modal" role="dialog" aria-modal="true" aria-labelledby="filePickerTitle">
+        <header>
+          <div>
+            <h2 id="filePickerTitle">SELECT FOLDER</h2>
+            <p id="filePickerHint">Choose a path on the runner host</p>
+          </div>
+          <button class="icon-button" id="filePickerCloseBtn" title="Close">×</button>
+        </header>
+        <div class="file-picker-toolbar">
+          <button class="ghost-button" id="filePickerUpBtn">Up</button>
+          <div class="file-picker-shortcuts">
+            <button class="mini-button warn" id="shortcutCucianBtn" title="/home/endri-pro/Downloads/CUCIAN/">CUCIAN</button>
+            <button class="mini-button" id="shortcutMediaBtn" title="/run/media/endri-pro/">/run/media</button>
+            <button class="mini-button" id="shortcutHomeBtn" title="/home/endri-pro/">Home</button>
+          </div>
+          <code id="filePickerPath"></code>
+        </div>
+        <div class="file-picker-list" id="filePickerList"></div>
+        <div class="settings-actions">
+          <button class="ghost-button" id="filePickerCancelBtn">Cancel</button>
+          <button class="run-button" id="filePickerChooseBtn">Choose</button>
+        </div>
+      </section>
+    </div>
+
+    <div class="modal-backdrop hidden" id="snapshotModal">
+      <section class="settings-modal snapshot-modal" role="dialog" aria-modal="true" aria-labelledby="snapshotTitle">
+        <header>
+          <div><h2 id="snapshotTitle">DEVICE SNAPSHOT</h2><p id="snapshotSerial"></p></div>
+          <button class="icon-button" id="snapshotCloseBtn" title="Close">×</button>
+        </header>
+        <div class="snapshot-body"><img id="snapshotImage" alt="Device snapshot" /></div>
       </section>
     </div>
   </div>
@@ -299,7 +386,6 @@ const els = {
   settingsBtn: document.querySelector("#settingsBtn"),
   settingsModal: document.querySelector("#settingsModal"),
   settingsCloseBtn: document.querySelector("#settingsCloseBtn"),
-  defaultRootBtn: document.querySelector("#defaultRootBtn"),
   preflightBtn: document.querySelector("#preflightBtn"),
   settingsSaveBtn: document.querySelector("#settingsSaveBtn"),
   browseBtn: document.querySelector("#browseBtn"),
@@ -324,9 +410,26 @@ const els = {
   warningsModal: document.querySelector("#warningsModal"),
   warningsCloseBtn: document.querySelector("#warningsCloseBtn"),
   warningsOkBtn: document.querySelector("#warningsOkBtn"),
+  warningsReopenBtn: document.querySelector("#warningsReopenBtn"),
   warningsList: document.querySelector("#warningsList"),
   warningsTitle: document.querySelector("#warningsTitle"),
   warningsText: document.querySelector("#warningsText"),
+  filePickerModal: document.querySelector("#filePickerModal"),
+  filePickerTitle: document.querySelector("#filePickerTitle"),
+  filePickerHint: document.querySelector("#filePickerHint"),
+  filePickerPath: document.querySelector("#filePickerPath"),
+  filePickerList: document.querySelector("#filePickerList"),
+  filePickerUpBtn: document.querySelector("#filePickerUpBtn"),
+  shortcutCucianBtn: document.querySelector("#shortcutCucianBtn"),
+  shortcutMediaBtn: document.querySelector("#shortcutMediaBtn"),
+  shortcutHomeBtn: document.querySelector("#shortcutHomeBtn"),
+  filePickerCloseBtn: document.querySelector("#filePickerCloseBtn"),
+  filePickerCancelBtn: document.querySelector("#filePickerCancelBtn"),
+  filePickerChooseBtn: document.querySelector("#filePickerChooseBtn"),
+  snapshotModal: document.querySelector("#snapshotModal"),
+  snapshotImage: document.querySelector("#snapshotImage"),
+  snapshotSerial: document.querySelector("#snapshotSerial"),
+  snapshotCloseBtn: document.querySelector("#snapshotCloseBtn"),
 };
 
 els.retryInput.value = state.retryCount;
@@ -348,10 +451,29 @@ els.settingsModal.addEventListener("click", (event) => {
 });
 els.warningsCloseBtn.addEventListener("click", () => els.warningsModal.classList.add("hidden"));
 els.warningsOkBtn.addEventListener("click", () => els.warningsModal.classList.add("hidden"));
+els.warningsReopenBtn.addEventListener("click", reopenRunner);
 els.warningsModal.addEventListener("click", (event) => {
   if (event.target === els.warningsModal) els.warningsModal.classList.add("hidden");
 });
-els.defaultRootBtn.addEventListener("click", loadDefaultRoot);
+els.filePickerCloseBtn.addEventListener("click", () => closeFilePicker([]));
+els.filePickerCancelBtn.addEventListener("click", () => closeFilePicker([]));
+els.filePickerModal.addEventListener("click", (event) => {
+  if (event.target === els.filePickerModal) closeFilePicker([]);
+});
+els.filePickerUpBtn.addEventListener("click", () => {
+  if (state.picker?.parent) loadFilePicker(state.picker.parent);
+});
+els.shortcutCucianBtn?.addEventListener("click", () => loadFilePicker("/home/endri-pro/Downloads/CUCIAN/"));
+els.shortcutMediaBtn?.addEventListener("click", () => loadFilePicker("/run/media/endri-pro/"));
+els.shortcutHomeBtn?.addEventListener("click", () => loadFilePicker("/home/endri-pro/"));
+els.filePickerChooseBtn.addEventListener("click", () => {
+  if (!state.picker) return;
+  closeFilePicker(state.picker.mode === "folder" ? [state.picker.path] : [...state.picker.selected]);
+});
+els.snapshotCloseBtn.addEventListener("click", closeSnapshot);
+els.snapshotModal.addEventListener("click", (event) => {
+  if (event.target === els.snapshotModal) closeSnapshot();
+});
 els.preflightBtn.addEventListener("click", runPreflight);
 els.settingsSaveBtn.addEventListener("click", saveSettings);
 els.browseBtn.addEventListener("click", browseRoot);
@@ -383,7 +505,7 @@ document.addEventListener("keydown", (event) => {
   }
 });
 
-listen("gba-run-started", async (event) => {
+subscribe("gba-run-started", async (event) => {
   const payload = event.payload || {};
   const runId = payload.run_id;
   const runMode = payload.test_type;
@@ -416,18 +538,18 @@ listen("gba-run-started", async (event) => {
   els.cancelBtn.disabled = false;
   els.statusLine.textContent = "Running";
   
-  await refreshDevices();
+  await refreshDevices(true);
 });
 
-listen("gba-run-log", (event) => {
+subscribe("gba-run-log", (event) => {
   const payload = event.payload;
   if (payload && typeof payload === 'object' && payload.line !== undefined) {
-    appendLog(payload.line, payload.run_id);
+    appendLog(payload.line, payload.run_id, payload.timestamp, false);
   } else {
     appendLog(String(payload || ""));
   }
 });
-listen("gba-suite-status", (event) => {
+subscribe("gba-suite-status", (event) => {
   const payload = event.payload || {};
   ensureFlow(payload.run_id, payload.test_type, payload.devices);
   state.suiteStatuses.set(`${payload.run_id || "legacy"}:${payload.suite}:${payload.devices || ""}`, payload);
@@ -435,7 +557,7 @@ listen("gba-suite-status", (event) => {
   renderSuiteStatus();
   renderMetrics();
 });
-listen("gba-summary", (event) => {
+subscribe("gba-summary", (event) => {
   const payload = event.payload || {};
   ensureFlow(payload.run_id, payload.test_type, payload.devices);
   state.summaries.set(`${payload.run_id || "legacy"}:${payload.suite}:${payload.devices || ""}`, payload);
@@ -444,7 +566,7 @@ listen("gba-summary", (event) => {
   renderSuiteStatus();
   renderMetrics();
 });
-listen("gba-laundry-result-update", (event) => {
+subscribe("gba-laundry-result-update", (event) => {
   const payload = event.payload || {};
   if (!payload.id) return;
   const lockedKey = [...state.lockedLaundryResults.entries()]
@@ -457,7 +579,7 @@ listen("gba-laundry-result-update", (event) => {
   }
   renderFlowMap();
 });
-listen("gba-run-finished", (event) => {
+subscribe("gba-run-finished", (event) => {
   const payload = event.payload || {};
   if (payload.run_id) {
     if (payload.result_dir) state.resultDirs.set(payload.run_id, payload.result_dir);
@@ -487,17 +609,178 @@ listen("gba-run-finished", (event) => {
   renderMetrics();
 });
 
-listen("gba-tool-error", (event) => {
+subscribe("gba-tool-error", (event) => {
   showInfoModal("Tool Error", "AI Worker reported an error.", [String(event.payload || "")], "error");
 });
 
 init();
 
+async function ensureRunner() {
+  if (isTauri) return;
+  let status = await api("/launcher/status");
+  if (status.status === "running") return;
+  if (status.status === "ready") {
+    try {
+      await api("/api/status");
+      return;
+    } catch (_) {}
+  }
+  await api("/launcher/start-runner", { method: "POST", body: "{}" });
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    status = await api("/launcher/status");
+    if (status.status === "running") return;
+  }
+  throw new Error("Runner tidak berhasil dijalankan pada port 3030");
+}
+
+async function syncBrowserStatus() {
+  if (isTauri) return;
+  try {
+    const status = await api("/api/status");
+    syncBrowserRunState(status);
+    await syncBrowserLogs();
+    els.statusLine.textContent = state.running ? "Running" : status.status === "DONE" ? "Completed" : "Standby";
+    await refreshDevices(true);
+    renderLogTabs();
+    renderFlowMap();
+    renderMetrics();
+  } catch (error) {
+    appendLog(`[runner] Status check failed: ${error}`);
+    showTauriOffline(error);
+  }
+}
+
+async function syncBrowserLogs() {
+  for (const runId of [...state.logFlows.keys()].filter((id) => id !== "boot")) {
+    const response = await api(`/api/run-logs?run_id=${encodeURIComponent(runId)}&suite=RUNNER`);
+    const logs = String(response.logs || "");
+    if (!logs || state.browserLogCache.get(runId) === logs) continue;
+    state.browserLogCache.set(runId, logs);
+    const flow = state.logFlows.get(runId);
+    if (!flow) continue;
+    flow.tabs = new Map();
+    ["AI Worker", "CTS", "GTS", "STS"].forEach((kind) => ensureLogSubtab(runId, kind));
+    for (const line of logs.split("\n").filter(Boolean)) {
+      if (line.startsWith("--- LOG FILE:")) continue;
+      const kind = logKind(line.replace(/^\d{2}:\d{2}:\d{2}\s+/, ""));
+      const tab = ensureLogSubtab(runId, kind);
+      const hasTime = /^\d{2}:\d{2}:\d{2}/.test(line);
+      const stamp = new Date().toLocaleTimeString("en-GB", { hour12: false });
+      tab.lines.push(hasTime ? line : `${stamp} ${line}`);
+    }
+  }
+  renderLog();
+}
+
+function syncBrowserRunState(status) {
+  const runningDevices = Array.isArray(status.running_devices) ? status.running_devices : [];
+  const nextRuns = new Set(runningDevices.map((device) => device.run_id).filter(Boolean));
+  const runDevices = new Map();
+  const runTypes = new Map();
+  for (const device of runningDevices) {
+    const serials = runDevices.get(device.run_id) || [];
+    serials.push(device.serial);
+    runDevices.set(device.run_id, serials);
+    runTypes.set(device.run_id, device.test_type || "Run");
+  }
+
+  state.activeRuns = nextRuns;
+  state.runDevices = runDevices;
+  state.running = status.status === "RUNNING";
+
+  for (const option of Array.isArray(status.log_options) ? status.log_options : []) {
+    const runId = option.run_id || option.id;
+    if (!runId) continue;
+    if (option.result_dir) state.resultDirs.set(runId, option.result_dir);
+    if (option.test_type && !state.flows.has(runId)) ensureFlow(runId, option.test_type, option.devices || "");
+    for (const row of Array.isArray(option.laundry_rows) ? option.laundry_rows : []) {
+      const id = `${runId}:${row.id}`;
+      if (!state.lockedLaundryResults.has(id)) {
+        state.lockedLaundryResults.set(id, {
+          ...row,
+          runId,
+          mode: option.test_type || state.selectedMode,
+          devices: option.devices || row.devices || "",
+          locked: true,
+          status: row.status || "Queued",
+        });
+      }
+    }
+  }
+
+  for (const runId of nextRuns) {
+    const devices = runDevices.get(runId) || [];
+    const testType = runTypes.get(runId) || "Run";
+    ensureFlow(runId, testType, devices.join(","));
+    if (!state.logFlows.has(runId)) {
+      createRunLogFlow(runId, testType, devices.map((serial) => state.devices.find((device) => device.serial === serial) || { serial }));
+    }
+    if (!state.activeLogFlow || state.activeLogFlow === "boot") {
+      state.activeLogFlow = runId;
+    }
+  }
+
+  if (Array.isArray(status.suites) && status.suites.length > 0) {
+    const activeStatusKeys = new Set();
+    for (const suite of status.suites) {
+      const runId = suite.run_id || "legacy";
+      const devices = Array.isArray(suite.devices) ? suite.devices.join(",") : String(suite.devices || "");
+      const testType = runTypes.get(runId) || state.flows.get(runId)?.mode || "Run";
+      ensureFlow(runId, testType, devices);
+      const payload = { ...suite, run_id: runId, test_type: testType, devices };
+      const key = `${runId}:${suite.suite}:${devices}`;
+      activeStatusKeys.add(key);
+      state.suiteStatuses.set(key, payload);
+    }
+    for (const key of [...state.suiteStatuses.keys()]) {
+      if (key.startsWith("legacy:") || !activeStatusKeys.has(key)) state.suiteStatuses.delete(key);
+    }
+  }
+  els.cancelBtn.disabled = !state.running;
+}
+
 async function init() {
   render();
+  try {
+    await ensureRunner();
+  } catch (error) {
+    appendLog(`[runner] Startup failed: ${error}`);
+    showTauriOffline(error);
+    return;
+  }
   await reconcileAutoRoot();
   await refreshDevices();
   await runPreflight(false);
+  if (!isTauri) window.setInterval(syncBrowserStatus, 2000);
+}
+
+function showTauriOffline(error) {
+  showInfoModal(
+    "Tauri Tidak Aktif",
+    "Tauri sedang tidak aktif atau tidak dapat dihubungi.",
+    [String(error), "Klik Reopen untuk menjalankan kembali Tauri."],
+    "error",
+    true,
+  );
+}
+
+async function reopenRunner() {
+  els.warningsReopenBtn.disabled = true;
+  els.warningsReopenBtn.textContent = "Reopening...";
+  try {
+    await api("/launcher/start-runner", { method: "POST", body: "{}" });
+    await ensureRunner();
+    els.warningsModal.classList.add("hidden");
+    await reconcileAutoRoot();
+    await refreshDevices(true);
+    await runPreflight(false);
+  } catch (error) {
+    showTauriOffline(error);
+  } finally {
+    els.warningsReopenBtn.disabled = false;
+    els.warningsReopenBtn.textContent = "Reopen";
+  }
 }
 
 async function loadDefaultRoot(overwrite = true) {
@@ -526,14 +809,18 @@ async function reconcileAutoRoot() {
   }
 }
 
-async function refreshDevices() {
-  appendLog("[adb] Refreshing devices...");
+async function refreshDevices(silent = false) {
+  if (!silent) appendLog("[adb] Refreshing devices...");
   els.deviceFooter.textContent = "Scanning";
   try {
-    state.devices = applyLocalBusyOverlay(await invoke("list_devices"));
+    const devices = await invoke("list_devices");
+    for (const device of devices) {
+      if (state.localBusy.has(device.serial) && !device.busy) state.localBusy.delete(device.serial);
+    }
+    state.devices = applyLocalBusyOverlay(devices);
     const ready = new Set(state.devices.filter((d) => d.state === "device" && !d.busy).map((d) => d.serial));
     state.selected = new Set([...state.selected].filter((serial) => ready.has(serial)));
-    appendLog(`[adb] Found ${state.devices.length} device(s).`);
+    if (!silent) appendLog(`[adb] Found ${state.devices.length} device(s).`);
   } catch (error) {
     appendLog(`[adb] Refresh failed: ${error}`);
     showInfoModal("ADB Refresh Failed", "Device scan failed.", [String(error)], "error");
@@ -879,6 +1166,63 @@ function startFlowResize(event) {
   window.addEventListener("pointercancel", onUp);
 }
 
+function getEffectiveLaundryRows() {
+  const lockedMap = new Map(state.lockedLaundryResults);
+
+  const activeRunIds = new Set([...state.activeRuns, ...state.flows.keys()]);
+  for (const runId of activeRunIds) {
+    const flow = state.flows.get(runId) || {};
+    const mode = flow.mode || state.selectedMode || "Laundry Run";
+    if (!isLaundryMode(mode)) continue;
+    const devices = flow.devices || (state.runDevices.get(runId) || []).join(",");
+    const statuses = [...state.suiteStatuses.values()].filter((s) => (s.run_id || "legacy") === runId);
+
+    const hasRows = [...lockedMap.values()].some((row) => row.runId === runId);
+    if (hasRows) {
+      [...lockedMap.entries()].forEach(([key, row]) => {
+        if (row.runId === runId) {
+          const matchingStatus = statuses.find((s) => s.suite === row.suite);
+          if (matchingStatus) {
+            const summary = state.summaries.get(`${runId}:${matchingStatus.suite}:${matchingStatus.devices || ""}`);
+            lockedMap.set(key, updateLaundryRow(row, {
+              status: matchingStatus.status,
+              time: formatDuration(Number(matchingStatus.elapsed_secs || 0)),
+              total: summary?.total,
+              passed: summary?.passed,
+              failed: summary?.failed,
+            }));
+          }
+        }
+      });
+    } else if (statuses.length > 0) {
+      statuses.forEach((s) => {
+        const key = `${runId}:${s.suite}:${s.devices || ""}`;
+        const summary = state.summaries.get(key) || {};
+        lockedMap.set(key, {
+          id: key,
+          originalId: s.suite,
+          runId,
+          mode,
+          suite: s.suite,
+          testcase: `${s.suite} ${flow.model || ""} ${s.devices || s.run_id || ""}`,
+          suite_version: s.suite_version || "-",
+          subtestcases: s.command || `${s.suite.toLowerCase()} --serial ${s.devices || ""}`,
+          devices,
+          locked: true,
+          status: s.status || "Running",
+          time: formatDuration(Number(s.elapsed_secs || 0)),
+          total: Number(summary.total || 0),
+          passed: Number(summary.passed || 0),
+          failed: Number(summary.failed || 0),
+          result_dir: state.resultDirs.get(runId) || s.result_dir || "",
+        });
+      });
+    }
+  }
+
+  return [...lockedMap.values()].filter((row) => isLaundryMode(row.mode));
+}
+
 function renderFlowMap() {
   const previousScrollTop = els.flowMap.querySelector(".run-table-content-area")?.scrollTop || 0;
   if (!isLaundryMode(state.selectedMode)) {
@@ -892,22 +1236,19 @@ function renderFlowMap() {
     return;
   }
 
-  const lockedRows = [...state.lockedLaundryResults.values()]
-    .filter((row) => isLaundryMode(row.mode))
+  const lockedRows = getEffectiveLaundryRows()
     .sort((a, b) => Number(state.activeRuns.has(b.runId)) - Number(state.activeRuns.has(a.runId)));
-  if (!state.laundrySources.length && !state.laundryResults.length && !lockedRows.length) {
-    els.flowMap.innerHTML = `
-      <div class="laundry-table-empty">
-        <strong>${escapeHtml(state.selectedMode)}</strong>
-        <span>Pick laundry zip to preview CTS, GTS, and STS results.</span>
-      </div>
-    `;
-    return;
-  }
 
   // Count elements for tabs
-  const runningRows = lockedRows.filter((row) => state.activeRuns.has(row.runId));
-  const completedRows = lockedRows.filter((row) => !state.activeRuns.has(row.runId));
+  const isRunActive = (row) => {
+    if (state.activeRuns.has(row.runId) || state.runDevices.has(row.runId)) return true;
+    if (row.devices?.split(",").some((serial) => state.localBusy.has(serial))) return true;
+    const statuses = [...state.suiteStatuses.values()].filter((status) => status.run_id === row.runId);
+    if (statuses.some((status) => ["Starting", "Running", "Waiting", "Copying result", "Waiting device reconnect"].includes(status.status))) return true;
+    return state.running && row.status === "Queued";
+  };
+  const runningRows = lockedRows.filter(isRunActive);
+  const completedRows = lockedRows.filter((row) => !isRunActive(row));
 
   const runningRunIds = [...new Set(runningRows.map((r) => r.runId))];
   const completedRunIds = [...new Set(completedRows.map((r) => r.runId))];
@@ -916,10 +1257,10 @@ function renderFlowMap() {
   const completedCount = completedRunIds.length;
 
   if (!state.runTableTab) {
-    state.runTableTab = "preview";
+    state.runTableTab = runningCount > 0 ? "running" : "preview";
   }
   if (!["preview", "running", "completed"].includes(state.runTableTab)) {
-    state.runTableTab = "preview";
+    state.runTableTab = runningCount > 0 ? "running" : "preview";
   }
 
   const tabsHtml = `
@@ -950,7 +1291,12 @@ function renderFlowMap() {
         });
       }).join("")}</div>`;
     } else {
-      contentHtml = `<div class="empty">No preview zip loaded. Select a laundry mode action to browse and load a zip.</div>`;
+      contentHtml = `
+        <div class="laundry-table-empty">
+          <strong>${escapeHtml(state.selectedMode)}</strong>
+          <span>Pick laundry zip to preview CTS, GTS, and STS results.</span>
+        </div>
+      `;
     }
   } else if (state.runTableTab === "running") {
     if (runningCount > 0) {
@@ -1433,18 +1779,81 @@ function shortFingerprint(value) {
 }
 
 function isLaundryMode(modeName) {
-  return modeName === "Laundry SMR" || modeName === "Laundry Normal";
+  return modeName === "Laundry SMR" || modeName === "Laundry Normal" || modeName === "Laundry SKU";
+}
+
+function closeFilePicker(value) {
+  const picker = state.picker;
+  state.picker = null;
+  els.filePickerModal.classList.add("hidden");
+  picker?.resolve(value);
+}
+
+async function loadFilePicker(path) {
+  if (!state.picker) return;
+  try {
+    const data = await hostApi(`/api/browse?path=${encodeURIComponent(path)}&kind=${state.picker.mode}`);
+    state.picker = { ...state.picker, ...data, path: data.path, parent: data.parent };
+    els.filePickerPath.textContent = data.path;
+    els.filePickerUpBtn.disabled = !data.parent;
+    els.filePickerList.innerHTML = data.entries.map((entry) => `
+      <button class="file-picker-entry ${entry.is_dir ? "directory" : "file"}" data-picker-path="${escapeHtml(entry.path)}" data-picker-dir="${entry.is_dir}">
+        <span>${entry.is_dir ? "📁" : "🗜️"}</span><strong>${escapeHtml(entry.name)}</strong>
+      </button>`).join("") || `<div class="file-picker-empty">Folder is empty</div>`;
+    els.filePickerList.querySelectorAll("[data-picker-path]").forEach((entry) => {
+      entry.addEventListener("click", () => {
+        if (entry.dataset.pickerDir === "true") return loadFilePicker(entry.dataset.pickerPath);
+        if (state.picker.mode === "zip") {
+          const selected = new Set(state.picker.selected);
+          if (selected.has(entry.dataset.pickerPath)) selected.delete(entry.dataset.pickerPath);
+          else if (state.picker.multiple) selected.add(entry.dataset.pickerPath);
+          else selected.clear(), selected.add(entry.dataset.pickerPath);
+          state.picker.selected = selected;
+          els.filePickerList.querySelectorAll("[data-picker-path]").forEach((item) => {
+            const isSelected = selected.has(item.dataset.pickerPath);
+            item.classList.toggle("selected", isSelected);
+            item.setAttribute("aria-selected", isSelected ? "true" : "false");
+          });
+        }
+      });
+    });
+  } catch (error) {
+    closeFilePicker([]);
+    showInfoModal("File Picker Failed", "Cannot read host folder.", [String(error)], "error");
+  }
+}
+
+const DEFAULT_CUCIAN_DIR = "/home/endri-pro/Downloads/CUCIAN/";
+
+function openFilePicker({ mode = "folder", multiple = false, initial = (mode === "zip" ? DEFAULT_CUCIAN_DIR : (state.autoRoot || DEFAULT_CUCIAN_DIR)) } = {}) {
+  return new Promise((resolve) => {
+    state.picker = { mode, multiple, path: initial || DEFAULT_CUCIAN_DIR, selected: [], resolve };
+    els.filePickerTitle.textContent = mode === "zip" ? "SELECT LAUNDRY ZIP" : "SELECT FOLDER";
+    els.filePickerHint.textContent = mode === "zip" ? "Choose one or more ZIP files on the runner host" : "Choose a folder on the runner host";
+    els.filePickerChooseBtn.textContent = mode === "zip" ? "Choose ZIP" : "Choose Folder";
+    els.filePickerModal.classList.remove("hidden");
+    loadFilePicker(state.picker.path);
+  });
+}
+
+function closeSnapshot() {
+  els.snapshotModal.classList.add("hidden");
+  els.snapshotImage.removeAttribute("src");
+}
+
+function openSnapshot(serial) {
+  els.snapshotSerial.textContent = serial;
+  els.snapshotImage.src = `${isTauri ? "http://127.0.0.1:3030" : ""}/api/screenshot?serial=${encodeURIComponent(serial)}`;
+  els.snapshotModal.classList.remove("hidden");
 }
 
 async function chooseLaundryZip() {
-  const selected = await open({
-    directory: false,
-    multiple: true,
-    filters: [{ name: "Laundry zip", extensions: ["zip"] }],
-  });
-  const paths = (Array.isArray(selected) ? selected : [selected])
-    .map(normalizeDialogPath)
-    .filter(Boolean);
+  const selected = isTauri
+    ? await open({ defaultPath: DEFAULT_CUCIAN_DIR, directory: false, multiple: true, filters: [{ name: "Laundry zip", extensions: ["zip"] }] })
+    : await openFilePicker({ mode: "zip", multiple: true, initial: DEFAULT_CUCIAN_DIR });
+  const paths = isTauri
+    ? (Array.isArray(selected) ? selected : [selected]).map(normalizeDialogPath).filter(Boolean)
+    : selected;
   if (!paths.length) return;
 
   state.laundrySources = [];
@@ -1496,6 +1905,8 @@ async function chooseLaundryZip() {
 
 async function runSelected() {
   saveInlineSettings();
+  state.captureUiLogs = true;
+  state.pendingUiLogs = [];
   const mode = TEST_MODES.find((item) => item.id === state.selectedMode);
   const runMode = state.selectedMode;
   const runFlow = currentModeFlow();
@@ -1611,6 +2022,10 @@ async function runSelected() {
           test_type: runMode,
           laundry_zip_path: isLaundryMode(runMode) ? plan.source.path : null,
           selected_laundry_results: isLaundryMode(runMode) ? plan.selectedIds : [],
+          selected_laundry_rows: isLaundryMode(runMode)
+            ? state.laundryResults.filter((row) => plan.selectedUiIds.includes(row.id))
+            : [],
+          ui_log_lines: state.pendingUiLogs.splice(0),
           user_devices: groupUserDevices,
           userdebug_devices: groupUserdebugDevices,
           retry_count: state.retryCount,
@@ -1636,6 +2051,8 @@ async function runSelected() {
     state.laundryZipPath = "";
   }
   state.running = state.activeRuns.size > 0;
+  state.captureUiLogs = false;
+  state.pendingUiLogs = [];
   els.cancelBtn.disabled = state.activeRuns.size === 0;
   els.statusLine.textContent = state.running ? "Running" : "Run failed";
   render();
@@ -1775,13 +2192,8 @@ async function toggleLamp(serial) {
 
 async function openScrcpy(serial) {
   if (!serial) return;
-  appendLog(`[runner] Opening scrcpy for ${serial}`);
-  try {
-    await invoke("open_scrcpy", { serial });
-  } catch (error) {
-    appendLog(`[runner] scrcpy failed for ${serial}: ${error}`);
-    showInfoModal("Scrcpy Failed", `Device: ${serial}`, [String(error)], "error");
-  }
+  appendLog(`[runner] Snapshot ${serial}`);
+  openSnapshot(serial);
 }
 
 function openSettings() {
@@ -1798,8 +2210,10 @@ function closeSettings() {
 }
 
 async function browseRoot() {
-  const selected = await open({ directory: true, multiple: false, defaultPath: state.autoRoot || undefined });
-  const path = normalizeDialogPath(selected);
+  const selected = isTauri
+    ? await open({ directory: true, multiple: false, defaultPath: state.autoRoot || undefined })
+    : await openFilePicker({ mode: "folder", initial: state.autoRoot || undefined });
+  const path = isTauri ? normalizeDialogPath(selected) : selected[0] || "";
   if (path) els.autoRootInput.value = path;
 }
 
@@ -1846,6 +2260,9 @@ function validateRun(mode, userDevices, userdebugDevices) {
   const busySelected = state.devices.filter((device) => state.selected.has(device.serial) && device.busy);
   if (busySelected.length) return `Device busy: ${busySelected.map((device) => device.serial).join(", ")}`;
   if (mode.needs === "user" && userDevices.length === 0) return `${mode.name} needs at least one non-userdebug device.`;
+  if ((mode.id === "Laundry Normal" || mode.id === "Laundry SKU") && userdebugDevices.length) {
+    return `${mode.name} hanya boleh menggunakan device USER.`;
+  }
   if (mode.needs === "userdebug" && userdebugDevices.length === 0) return `${mode.name} needs at least one userdebug device.`;
   if (mode.id === "Laundry SMR") {
     const laundryValidation = validateLaundrySmrSelection();
@@ -1994,18 +2411,29 @@ function validateLaundrySmrSelection() {
   return "";
 }
 
-function appendLog(line, runId = null) {
+function appendLog(line, runId = null, timestamp = null, persist = true) {
   const text = redact(String(line || "")).replaceAll("[runner]", "[AI Worker]");
-  const stamp = new Date().toLocaleTimeString("en-GB", { hour12: false });
+  const stamp = timestamp || new Date().toLocaleTimeString("en-GB", { hour12: false });
   const kind = logKind(text);
-  
+
+  if (persist && state.captureUiLogs) state.pendingUiLogs.push(`${stamp} ${text}`);
+
   let flow;
   if (runId && state.logFlows.has(runId)) {
     flow = state.logFlows.get(runId);
+  } else if (runId) {
+    const run = state.flows.get(runId) || {};
+    flow = {
+      id: runId,
+      title: `${run.mode || "Run"} | ${run.model || "Unknown"} [${run.devices || "-"}]`,
+      tabs: new Map(),
+    };
+    state.logFlows.set(runId, flow);
+    ensureLogSubtab(runId, "AI Worker");
   } else {
     flow = latestLogFlowForKind(kind) || createBootLogFlow();
   }
-  
+
   if (!flow.tabs.has(kind)) flow.tabs.set(kind, { kind, lines: [] });
   const tab = flow.tabs.get(kind);
   tab.lines.push(`${stamp} ${text}`);
@@ -2187,11 +2615,12 @@ function formatDuration(total) {
   return `${h}:${m}:${s}`;
 }
 
-function showInfoModal(title, message, lines = [], tone = "info") {
+function showInfoModal(title, message, lines = [], tone = "info", reopen = false) {
   els.warningsModal.dataset.tone = tone;
   els.warningsTitle.textContent = title;
   els.warningsText.textContent = message;
   els.warningsList.innerHTML = lines.map((line) => `<li>${escapeHtml(line)}</li>`).join("");
+  els.warningsReopenBtn.classList.toggle("hidden", !reopen);
   els.warningsModal.classList.remove("hidden");
 }
 

@@ -25,6 +25,15 @@ npm install
 npm run dev
 ```
 
+Dashboard web melalui Docker (launcher service di host harus tetap berjalan):
+
+```bash
+python3 scripts/launcher_service.py
+docker compose up --build -d
+```
+
+Buka `http://localhost:18080`.
+
 Build frontend saja:
 
 ```bash

@@ -1,6 +1,12 @@
 import subprocess
 from http.server import HTTPServer, BaseHTTPRequestHandler
 import json
+import socket
+
+def runner_running():
+    with socket.socket() as sock:
+        sock.settimeout(0.3)
+        return sock.connect_ex(("127.0.0.1", 3030)) == 0
 
 class LauncherHandler(BaseHTTPRequestHandler):
     def do_POST(self):
@@ -39,7 +45,7 @@ class LauncherHandler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header('Content-Type', 'application/json')
             self.end_headers()
-            self.wfile.write(json.dumps({"status": "ready"}).encode('utf-8'))
+            self.wfile.write(json.dumps({"status": "running" if runner_running() else "stopped"}).encode('utf-8'))
         else:
             self.send_response(404)
             self.end_headers()
