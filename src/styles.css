@@ -12,6 +12,9 @@
   --green: #f1f2f3;
   --red: #b9bdc4;
   --yellow: #d7d9dd;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
   background: var(--bg);
   color: var(--text);
@@ -664,9 +667,10 @@ h2 {
 .test-area {
   flex: 0 0 auto;
   display: flex;
-  flex-wrap: nowrap;
-  gap: 8px;
-  padding: 10px 12px;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 12px;
+  background: var(--panel);
   border-bottom: 1px solid var(--line-soft);
   overflow-x: auto;
   overflow-y: hidden;
@@ -674,28 +678,39 @@ h2 {
   scrollbar-color: var(--line) transparent;
 }
 
-.selected-strip,
-.run-options {
+.workspace-meta-bar {
   flex: 0 0 auto;
   display: flex;
   align-items: center;
-  gap: 8px;
-  min-height: 34px;
-  padding: 5px 12px;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 32px;
+  padding: 4px 12px;
+  background: #17191d;
   border-bottom: 1px solid var(--line-soft);
-  background: #21222c;
+  overflow: hidden;
+}
+
+.selected-strip {
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
   overflow: hidden;
 }
 
 .selected-strip span {
   min-width: 0;
-  max-width: 260px;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   color: var(--muted);
-  font-size: 10px;
-  font-weight: 800;
+  font-size: 11px;
+  font-weight: 700;
 }
 
 .selected-strip b {
@@ -704,9 +719,13 @@ h2 {
 }
 
 .run-options {
-  justify-content: flex-end;
-  min-height: 32px;
-  background: var(--bg);
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0;
+  border: 0;
+  background: transparent;
 }
 
 .preflight-panel {
@@ -1094,7 +1113,7 @@ body.resizing-flow {
   height: 20px;
   max-width: 100%;
   padding: 0 7px;
-  border-radius: 999px;
+  border-radius: var(--radius-sm);
   background: var(--panel-2);
   color: var(--muted);
   font-size: 9px;
@@ -2009,20 +2028,41 @@ body.resizing-flow {
 }
 
 .titlebar,
+.brand-mark {
+  filter: none !important;
+}
+
 .devices-pane > .pane-head,
 .devices-pane > footer {
   filter: grayscale(1);
 }
 
+/* Boxy Design System Tokens (antislop-ui) */
 button,
 input,
-.device-card,
-.mode-card,
 .type-pill,
 .result-pill,
 .toolbar-pill,
-.elapsed-pill {
-  border-radius: 2px !important;
+.elapsed-pill,
+.status-pill,
+.mini-button,
+.ghost-button,
+.run-button {
+  border-radius: var(--radius-sm) !important;
+}
+
+.device-card,
+.mode-card,
+.flow-card,
+.laundry-table-card,
+.warning-card {
+  border-radius: var(--radius-md) !important;
+}
+
+.settings-modal,
+.file-picker-modal,
+.snapshot-modal {
+  border-radius: var(--radius-lg) !important;
 }
 
 button:not(:disabled):hover {
@@ -2033,16 +2073,8 @@ button:not(:disabled):active {
   transform: translateY(1px);
 }
 
-.test-area {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
-  gap: 8px;
-  width: 100%;
-  overflow-x: auto;
-}
-
 .test-area .mode-card {
-  width: 100%;
+  flex: 1 1 auto;
 }
 
 /* Run Table Tabs Styles */

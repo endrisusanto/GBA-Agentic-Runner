@@ -190,20 +190,20 @@ app.innerHTML = `
         <button class="ghost-button" id="openResultBtn" disabled>Open Result</button>
         <button class="ghost-button" id="preflightToolbarBtn">Preflight</button>
         <div class="toolbar-spacer"></div>
-        <span class="toolbar-pill" id="modePill">Laundry SMR</span>
-        <span class="toolbar-pill" id="selectedPill">0 selected</span>
-        <span class="toolbar-pill" id="preflightPill">Preflight -</span>
         <span class="elapsed-pill" id="elapsedPill">00:00:00</span>
       </div>
 
-      <section class="selected-strip" id="selectedStrip"></section>
-      <section class="preflight-panel" id="preflightPanel"></section>
-      <section class="run-options">
-        <label class="retry">Retry <input id="retryInput" type="number" min="0" max="99" /></label>
-        <label class="retry">Timeout <input id="timeoutInput" type="number" min="60" /></label>
-      </section>
-
       <section class="test-area" id="testArea"></section>
+
+      <div class="workspace-meta-bar">
+        <section class="selected-strip" id="selectedStrip"></section>
+        <section class="run-options">
+          <label class="retry">Retry <input id="retryInput" type="number" min="0" max="99" /></label>
+          <label class="retry">Timeout <input id="timeoutInput" type="number" min="60" /></label>
+        </section>
+      </div>
+
+      <section class="preflight-panel" id="preflightPanel"></section>
 
       <section class="flow-map expanded" id="flowMapSection">
         <div class="accordion-header" id="flowMapHeader">
@@ -1026,8 +1026,8 @@ function renderSelectedStrip() {
     selectedDevices.some((device) => device.is_userdebug) ? "USERDEBUG" : "",
   ].filter(Boolean).join("+") || "-";
   const selectedText = `${selectedDevices.length} selected`;
-  els.modePill.textContent = state.selectedMode;
-  els.selectedPill.textContent = selectedText;
+  if (els.modePill) els.modePill.textContent = state.selectedMode;
+  if (els.selectedPill) els.selectedPill.textContent = selectedText;
   els.selectedStrip.innerHTML = `
     <span><b>Selected</b> ${selectedText}</span>
     <span><b>Model</b> ${escapeHtml(models.join(", ") || "-")}</span>

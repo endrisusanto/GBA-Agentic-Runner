@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+if [[ "$*" == *"kill-server"* ]]; then
+    exit 0
+fi
+exec /usr/bin/adb "$@"

@@ -4,14 +4,14 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "WEBKIT_DISABLE_DMABUF_RENDERER=1 tauri dev",
+    "dev": "NODE_OPTIONS=--max-old-space-size=4096 WEBKIT_DISABLE_DMABUF_RENDERER=1 tauri dev",
     "build": "tauri build",
     "build:linux": "tauri build --bundles deb,rpm",
     "build:local": "./build-linux.sh",
     "release:patch": "./scripts/release-next.sh patch",
     "release:minor": "./scripts/release-next.sh minor",
     "release:major": "./scripts/release-next.sh major",
-    "web:dev": "vite --host 127.0.0.1",
+    "web:dev": "NODE_OPTIONS=--max-old-space-size=4096 vite --host 127.0.0.1",
     "web:build": "vite build",
     "tauri": "tauri"
   },
