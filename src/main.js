@@ -36,7 +36,12 @@ function invoke(command, args = {}) {
   if (!routes[command]) return Promise.reject(new Error(`${command} is only available in the desktop app`));
   const [method, path, body] = routes[command];
   return api(path, { method, ...(body === undefined ? {} : { body: JSON.stringify(body) }) })
-    .then((data) => data.result ?? data);
+    .then((data) => {
+      if (data && typeof data === "object" && data.error) {
+        throw new Error(data.error);
+      }
+      return data && typeof data === "object" && "result" in data ? data.result : data;
+    });
 }
 
 function subscribe(event, handler) {
@@ -995,13 +1000,15 @@ function renderTestArea() {
 function renderPreflight() {
   if (!state.preflightLines.length) {
     els.preflightPanel.innerHTML = `<div class="preflight-empty">Preflight has not run.</div>`;
-    els.preflightPill.textContent = "Preflight -";
+    if (els.preflightPill) els.preflightPill.textContent = "Preflight -";
     return;
   }
   const groups = preflightGroups();
   const missing = groups.reduce((sum, group) => sum + group.bad.length, 0);
-  els.preflightPill.textContent = missing ? `Preflight ${missing}` : "Preflight OK";
-  els.preflightPill.className = `toolbar-pill ${missing ? "bad" : "ok"}`;
+  if (els.preflightPill) {
+    els.preflightPill.textContent = missing ? `Preflight ${missing}` : "Preflight OK";
+    els.preflightPill.className = `toolbar-pill ${missing ? "bad" : "ok"}`;
+  }
   els.preflightPanel.innerHTML = `
     <div class="preflight-head">
       <strong class="${missing ? "fail" : "pass"}">${missing ? `${missing} issue(s)` : "Ready"}</strong>
@@ -2222,15 +2229,16 @@ async function runPreflight(updateSettings = true) {
   if (els.settingsOutput) els.settingsOutput.textContent = "Checking...\n";
   try {
     const lines = await invoke("preflight", { autoRoot: state.autoRoot || null });
-    state.preflightLines = Array.isArray(lines) ? lines : [];
+    state.preflightLines = Array.isArray(lines) ? lines : (typeof lines === "string" ? [lines] : []);
     if (els.settingsOutput) els.settingsOutput.textContent = state.preflightLines.join("\n");
     renderPreflight();
     return state.preflightLines;
   } catch (error) {
-    state.preflightLines = [String(error)];
-    if (els.settingsOutput) els.settingsOutput.textContent = String(error);
+    const msg = String(error.message || error);
+    state.preflightLines = [`MISS preflight: ${msg}`];
+    if (els.settingsOutput) els.settingsOutput.textContent = msg;
     renderPreflight();
-    showInfoModal("Preflight Failed", "Cannot run preflight.", [String(error)], "error");
+    showInfoModal("Preflight Failed", "Cannot run preflight.", [msg], "error");
     return state.preflightLines;
   }
 }
