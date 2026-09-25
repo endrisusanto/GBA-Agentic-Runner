@@ -575,12 +575,16 @@ subscribe("gba-laundry-result-update", (event) => {
   const payload = event.payload || {};
   if (!payload.id) return;
   const lockedKey = [...state.lockedLaundryResults.entries()]
-    .find(([key, row]) => key.startsWith(`${payload.run_id || "legacy"}:`) && (row.originalId || row.id) === payload.id)?.[0];
+    .find(([key, row]) => {
+      const matchRun = !payload.run_id || row.runId === payload.run_id || key.startsWith(`${payload.run_id}:`);
+      const matchId = (row.originalId || row.id) === payload.id || row.id?.endsWith(`:${payload.id}`);
+      return matchRun && matchId;
+    })?.[0];
   if (lockedKey) {
     state.lockedLaundryResults.set(lockedKey, updateLaundryRow(state.lockedLaundryResults.get(lockedKey), payload));
   } else {
     state.laundryResults = state.laundryResults.map((row) =>
-      (row.originalId || row.id) === payload.id ? updateLaundryRow(row, payload) : row);
+      ((row.originalId || row.id) === payload.id || row.id?.endsWith(`:${payload.id}`)) ? updateLaundryRow(row, payload) : row);
   }
   renderFlowMap();
 });
@@ -1185,23 +1189,7 @@ function getEffectiveLaundryRows() {
     const statuses = [...state.suiteStatuses.values()].filter((s) => (s.run_id || "legacy") === runId);
 
     const hasRows = [...lockedMap.values()].some((row) => row.runId === runId);
-    if (hasRows) {
-      [...lockedMap.entries()].forEach(([key, row]) => {
-        if (row.runId === runId) {
-          const matchingStatus = statuses.find((s) => s.suite === row.suite);
-          if (matchingStatus) {
-            const summary = state.summaries.get(`${runId}:${matchingStatus.suite}:${matchingStatus.devices || ""}`);
-            lockedMap.set(key, updateLaundryRow(row, {
-              status: matchingStatus.status,
-              time: formatDuration(Number(matchingStatus.elapsed_secs || 0)),
-              total: summary?.total,
-              passed: summary?.passed,
-              failed: summary?.failed,
-            }));
-          }
-        }
-      });
-    } else if (statuses.length > 0) {
+    if (!hasRows && statuses.length > 0) {
       statuses.forEach((s) => {
         const key = `${runId}:${s.suite}:${s.devices || ""}`;
         const summary = state.summaries.get(key) || {};
@@ -1462,13 +1450,14 @@ function laundryRowStatus(row, checked) {
 }
 
 function updateLaundryRow(row, payload) {
+  const isFinished = ["Test Done", "Completed", "Failed", "Cancelled"].includes(payload.status);
   return {
     ...row,
     status: payload.status || row.status,
-    time: payload.time || row.time,
-    total: Number(payload.total ?? row.total ?? 0),
-    passed: Number(payload.passed ?? row.passed ?? 0),
-    failed: Number(payload.failed ?? row.failed ?? 0),
+    time: payload.time && payload.time !== "-" ? payload.time : row.time,
+    total: isFinished && payload.total !== undefined ? Number(payload.total) : (payload.total > 0 ? Number(payload.total) : row.total),
+    passed: isFinished && payload.passed !== undefined ? Number(payload.passed) : (payload.passed > 0 ? Number(payload.passed) : row.passed),
+    failed: isFinished && payload.failed !== undefined ? Number(payload.failed) : (payload.failed > 0 ? Number(payload.failed) : row.failed),
   };
 }
 
@@ -2103,8 +2092,9 @@ function isCtsVerifierRow(row) {
     row?.result_dir,
     row?.subtestcases,
     row?.id,
+    row?.suite,
   ].join(" ").toUpperCase();
-  return text.includes("CTS_VERIFIER") || text.includes("CTSV");
+  return text.includes("VERIFIER") || text.includes("CTSV") || text.includes("CTS-V");
 }
 
 function clearLocalBusy(serials) {

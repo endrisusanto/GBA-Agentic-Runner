@@ -2067,6 +2067,9 @@ fn is_scat_result_zip(path: &Path) -> bool {
         return false;
     };
     let name = name.to_ascii_lowercase();
+    if name.contains("verifier") || name.contains("ctsv") {
+        return false;
+    }
     name.strip_prefix("scat_result_")
         .and_then(|value| value.strip_suffix(".zip"))
         .is_some_and(|value| value.contains("_scat_"))
@@ -3438,6 +3441,20 @@ fn extract_zip_safe(zip_path: &Path, dst: &Path) -> Result<(), String> {
     Ok(())
 }
 
+fn is_cts_verifier_result(xml_path: &Path, result_dir: &Path) -> bool {
+    let dir_str = result_dir.display().to_string().to_lowercase();
+    if dir_str.contains("verifier") || dir_str.contains("ctsv") || dir_str.contains("cts_verifier") || dir_str.contains("cts-v") {
+        return true;
+    }
+    if let Some((name, _, _)) = get_suite_info_from_xml(xml_path) {
+        let lower_name = name.to_lowercase();
+        if lower_name.contains("verifier") || lower_name.contains("ctsv") {
+            return true;
+        }
+    }
+    false
+}
+
 fn scan_laundry_results(root: &Path) -> (Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf>) {
     let mut cts = Vec::new();
     let mut gts = Vec::new();
@@ -3449,17 +3466,13 @@ fn scan_laundry_results(root: &Path) -> (Vec<PathBuf>, Vec<PathBuf>, Vec<PathBuf
         let Some(result_dir) = entry.path().parent().map(Path::to_path_buf) else {
             continue;
         };
+        if is_cts_verifier_result(&entry.path(), &result_dir) {
+            continue;
+        }
         
         let mut suite = None;
         if let Some((name, _, _)) = get_suite_info_from_xml(&entry.path()) {
-            let lower_name = name.to_lowercase();
-            if lower_name.contains("cts") || lower_name.contains("compatibility") {
-                suite = Some("CTS".to_string());
-            } else if lower_name.contains("gts") || lower_name.contains("google") {
-                suite = Some("GTS".to_string());
-            } else if lower_name.contains("sts") || lower_name.contains("security") {
-                suite = Some("STS".to_string());
-            }
+            suite = classify_suite(&name);
         }
         
         if suite.is_none() {
@@ -3485,6 +3498,9 @@ fn scan_laundry_result_infos(root: &Path) -> Result<Vec<LaundryResultInfo>, Stri
         let Some(result_dir) = entry.path().parent() else {
             continue;
         };
+        if is_cts_verifier_result(&entry.path(), result_dir) {
+            continue;
+        }
         if let Some(info) = parse_laundry_result_info(root, result_dir, entry.path())? {
             rows.push(info);
         }
@@ -3561,7 +3577,9 @@ fn parse_laundry_result_info(root: &Path, result_dir: &Path, xml_path: &Path) ->
 
 fn classify_suite(name: &str) -> Option<String> {
     let lower = name.to_lowercase();
-    if lower.contains("cts") || lower.contains("compatibility") {
+    if lower.contains("verifier") || lower.contains("ctsv") {
+        None
+    } else if lower.contains("cts") || lower.contains("compatibility") {
         Some("CTS".to_string())
     } else if lower.contains("gts") || lower.contains("google") {
         Some("GTS".to_string())
@@ -3596,7 +3614,9 @@ fn format_duration_hms(total: u64) -> String {
 
 fn suite_hint_from_path(path: &Path) -> Option<String> {
     let text = path.display().to_string().to_lowercase();
-    if text.contains("cts") {
+    if text.contains("verifier") || text.contains("ctsv") {
+        None
+    } else if text.contains("cts") {
         Some("CTS".to_string())
     } else if text.contains("gts") {
         Some("GTS".to_string())
