@@ -75,12 +75,12 @@ install_deb() {
   local package_path="$1"
   local abs_path
   abs_path="$(realpath "$package_path")"
-  if command -v apt >/dev/null 2>&1; then
+  if command -v dpkg >/dev/null 2>&1; then
+    sudo dpkg -i "$abs_path"
+  elif command -v apt >/dev/null 2>&1; then
     sudo apt install -y --reinstall "$abs_path"
   elif command -v apt-get >/dev/null 2>&1; then
     sudo apt-get install -y --reinstall "$abs_path"
-  elif command -v dpkg >/dev/null 2>&1; then
-    sudo dpkg -i "$abs_path" || sudo apt-get install -f -y
   else
     echo "[build] Cannot install .deb: apt/dpkg not found" >&2
     return 1
