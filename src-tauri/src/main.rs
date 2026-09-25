@@ -2348,18 +2348,14 @@ fn run_laundry_retries(
             .file_name()
             .and_then(|name| name.to_str())
             .unwrap_or(&timestamp);
-        let session_id = if suite == "CTS" {
-            "0".to_string()
-        } else {
-            resolve_retry_session_id(
-                app,
-                suite,
-                &executable,
-                result_dir_name,
-                &log_dir.join(format!("laundry_list_{}_{}_{}devs.log", suite.to_lowercase(), index + 1, devices.len())),
-                run_id,
-            )?
-        };
+        let session_id = resolve_retry_session_id(
+            app,
+            suite,
+            &executable,
+            result_dir_name,
+            &log_dir.join(format!("laundry_list_{}_{}_{}devs.log", suite.to_lowercase(), index + 1, devices.len())),
+            run_id,
+        )?;
         let cmd = format!(
             "run retry --retry {session_id} --retry-type NOT_EXECUTED --shard-count {}{}",
             devices.len(),
