@@ -70,7 +70,7 @@
     },
     {
       "parameters": {
-        "url": "https://api.telegram.org/bot8718749688:AAEYhrEul8UNdH-MEU9jJjLIOnuVjsGknW8/answerCallbackQuery",
+        "url": "https://api.telegram.org/bot{{$env.TELEGRAM_BOT_TOKEN}}/answerCallbackQuery",
         "options": {},
         "method": "POST",
         "sendBody": true,
@@ -110,7 +110,7 @@
     },
     {
       "parameters": {
-        "url": "https://api.telegram.org/bot8718749688:AAEYhrEul8UNdH-MEU9jJjLIOnuVjsGknW8/sendMessage",
+        "url": "https://api.telegram.org/bot{{$env.TELEGRAM_BOT_TOKEN}}/sendMessage",
         "options": {},
         "method": "POST",
         "sendBody": true,
@@ -428,7 +428,7 @@
     },
     {
       "parameters": {
-        "url": "https://api.telegram.org/bot8718749688:AAEYhrEul8UNdH-MEU9jJjLIOnuVjsGknW8/sendMessage",
+        "url": "https://api.telegram.org/bot{{$env.TELEGRAM_BOT_TOKEN}}/sendMessage",
         "options": {},
         "method": "POST",
         "sendBody": true,
@@ -446,7 +446,7 @@
     },
     {
       "parameters": {
-        "url": "https://api.telegram.org/bot8718749688:AAEYhrEul8UNdH-MEU9jJjLIOnuVjsGknW8/sendMessage",
+        "url": "https://api.telegram.org/bot{{$env.TELEGRAM_BOT_TOKEN}}/sendMessage",
         "options": {},
         "method": "POST",
         "sendBody": true,
@@ -504,7 +504,7 @@
     },
     {
       "parameters": {
-        "url": "https://api.telegram.org/bot8718749688:AAEYhrEul8UNdH-MEU9jJjLIOnuVjsGknW8/sendMessage",
+        "url": "https://api.telegram.org/bot{{$env.TELEGRAM_BOT_TOKEN}}/sendMessage",
         "options": {},
         "method": "POST",
         "sendBody": true,
@@ -522,7 +522,7 @@
     },
     {
       "parameters": {
-        "url": "https://api.telegram.org/bot8718749688:AAEYhrEul8UNdH-MEU9jJjLIOnuVjsGknW8/sendMessage",
+        "url": "https://api.telegram.org/bot{{$env.TELEGRAM_BOT_TOKEN}}/sendMessage",
         "options": {},
         "method": "POST",
         "sendBody": true,
@@ -540,7 +540,7 @@
     },
     {
       "parameters": {
-        "url": "https://api.telegram.org/bot8718749688:AAEYhrEul8UNdH-MEU9jJjLIOnuVjsGknW8/sendMessage",
+        "url": "https://api.telegram.org/bot{{$env.TELEGRAM_BOT_TOKEN}}/sendMessage",
         "options": {},
         "method": "POST",
         "sendBody": true,
@@ -558,7 +558,7 @@
     },
     {
       "parameters": {
-        "url": "https://api.telegram.org/bot8718749688:AAEYhrEul8UNdH-MEU9jJjLIOnuVjsGknW8/sendMessage",
+        "url": "https://api.telegram.org/bot{{$env.TELEGRAM_BOT_TOKEN}}/sendMessage",
         "options": {},
         "method": "POST",
         "sendBody": true,
@@ -590,7 +590,7 @@
     },
     {
       "parameters": {
-        "url": "https://api.telegram.org/bot8718749688:AAEYhrEul8UNdH-MEU9jJjLIOnuVjsGknW8/sendMessage",
+        "url": "https://api.telegram.org/bot{{$env.TELEGRAM_BOT_TOKEN}}/sendMessage",
         "options": {},
         "method": "POST",
         "sendBody": true,
@@ -608,7 +608,7 @@
     },
     {
       "parameters": {
-        "url": "https://api.telegram.org/bot8718749688:AAEYhrEul8UNdH-MEU9jJjLIOnuVjsGknW8/sendMessage",
+        "url": "https://api.telegram.org/bot{{$env.TELEGRAM_BOT_TOKEN}}/sendMessage",
         "options": {},
         "method": "POST",
         "sendBody": true,
@@ -626,7 +626,7 @@
     },
     {
       "parameters": {
-        "url": "https://api.telegram.org/bot8718749688:AAEYhrEul8UNdH-MEU9jJjLIOnuVjsGknW8/sendMessage",
+        "url": "https://api.telegram.org/bot{{$env.TELEGRAM_BOT_TOKEN}}/sendMessage",
         "options": {},
         "method": "POST",
         "sendBody": true,
@@ -644,7 +644,7 @@
     },
     {
       "parameters": {
-        "url": "https://api.telegram.org/bot8718749688:AAEYhrEul8UNdH-MEU9jJjLIOnuVjsGknW8/sendMessage",
+        "url": "https://api.telegram.org/bot{{$env.TELEGRAM_BOT_TOKEN}}/sendMessage",
         "options": {},
         "method": "POST",
         "sendBody": true,
@@ -755,7 +755,7 @@
     },
     {
       "parameters": {
-        "url": "https://api.telegram.org/bot8718749688:AAEYhrEul8UNdH-MEU9jJjLIOnuVjsGknW8/sendMessage",
+        "url": "https://api.telegram.org/bot{{$env.TELEGRAM_BOT_TOKEN}}/sendMessage",
         "options": {},
         "method": "POST",
         "sendBody": true,
@@ -787,7 +787,7 @@
     },
     {
       "parameters": {
-        "url": "https://api.telegram.org/bot8718749688:AAEYhrEul8UNdH-MEU9jJjLIOnuVjsGknW8/sendMessage",
+        "url": "https://api.telegram.org/bot{{$env.TELEGRAM_BOT_TOKEN}}/sendMessage",
         "options": {},
         "method": "POST",
         "sendBody": true,
@@ -821,7 +821,7 @@
     },
     {
       "parameters": {
-        "url": "https://api.telegram.org/bot8718749688:AAEYhrEul8UNdH-MEU9jJjLIOnuVjsGknW8/sendMessage",
+        "url": "https://api.telegram.org/bot{{$env.TELEGRAM_BOT_TOKEN}}/sendMessage",
         "options": {},
         "method": "POST",
         "sendBody": true,
@@ -858,7 +858,7 @@
     },
     {
       "parameters": {
-        "url": "https://api.telegram.org/bot8718749688:AAEYhrEul8UNdH-MEU9jJjLIOnuVjsGknW8/sendMessage",
+        "url": "https://api.telegram.org/bot{{$env.TELEGRAM_BOT_TOKEN}}/sendMessage",
         "options": {},
         "method": "POST",
         "sendBody": true,

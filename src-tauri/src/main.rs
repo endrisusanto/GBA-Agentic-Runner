@@ -1919,7 +1919,8 @@ fn run_laundry_smr(
     run_id: &str,
 ) -> Result<SuiteOutcome, String> {
     let source = prepare_laundry_source(app, request, session_dir)?;
-    if !request.user_devices.is_empty() {
+    let has_cts_or_gts = !source.cts_results.is_empty() || !source.gts_results.is_empty();
+    if !request.user_devices.is_empty() && has_cts_or_gts {
         verify_laundry_suite_tools(app, root, &request.user_devices, &source, &["GTS", "CTS"])?;
     }
     if !request.userdebug_devices.is_empty() {
@@ -1967,7 +1968,7 @@ fn run_laundry_smr(
         }))
     };
 
-    if !request.user_devices.is_empty() {
+    if !request.user_devices.is_empty() && has_cts_or_gts {
         emit_log(app, "[runner] Laundry SMR: initial GTS gtsmr run.");
         let deviceinfo = run_laundry_initial_gts(
             app,
@@ -1983,38 +1984,44 @@ fn run_laundry_smr(
             &request.test_type,
         )?;
 
-        codes.extend(run_laundry_retries_with_deviceinfo(
-            app,
-            root,
-            session_dir,
-            log_dir,
-            "CTS",
-            &request.user_devices,
-            &source.extract_root,
-            &source.cts_results,
-            &deviceinfo,
-            request.timeout_secs,
-            model,
-            pda,
-            run_id,
-            &request.test_type,
-        )?);
-        codes.extend(run_laundry_retries_with_deviceinfo(
-            app,
-            root,
-            session_dir,
-            log_dir,
-            "GTS",
-            &request.user_devices,
-            &source.extract_root,
-            &source.gts_results,
-            &deviceinfo,
-            request.timeout_secs,
-            model,
-            pda,
-            run_id,
-            &request.test_type,
-        )?);
+        if !source.cts_results.is_empty() {
+            codes.extend(run_laundry_retries_with_deviceinfo(
+                app,
+                root,
+                session_dir,
+                log_dir,
+                "CTS",
+                &request.user_devices,
+                &source.extract_root,
+                &source.cts_results,
+                &deviceinfo,
+                request.timeout_secs,
+                model,
+                pda,
+                run_id,
+                &request.test_type,
+            )?);
+        }
+        if !source.gts_results.is_empty() {
+            codes.extend(run_laundry_retries_with_deviceinfo(
+                app,
+                root,
+                session_dir,
+                log_dir,
+                "GTS",
+                &request.user_devices,
+                &source.extract_root,
+                &source.gts_results,
+                &deviceinfo,
+                request.timeout_secs,
+                model,
+                pda,
+                run_id,
+                &request.test_type,
+            )?);
+        }
+    } else if !has_cts_or_gts {
+        emit_log(app, "[runner] Laundry SMR: STS-only selected, skipping GTS property/gtsmr process.");
     }
 
     if let Some(handle) = sts_handle {
@@ -3308,7 +3315,7 @@ fn verify_laundry_suite_tools(
     for suite in suites {
         let needed = match *suite {
             "CTS" => !source.cts_results.is_empty(),
-            "GTS" => true,
+            "GTS" => !source.cts_results.is_empty() || !source.gts_results.is_empty(),
             "STS" => !source.sts_results.is_empty(),
             _ => false,
         };

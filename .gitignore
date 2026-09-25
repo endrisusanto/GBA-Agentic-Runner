@@ -50,7 +50,9 @@ Thumbs.db
 .idea/
 .vscode/
 
-# Environment files
+# Environment & secret files
 .env
 .env.*
 !.env.example
+n8n.json
+n8n*.json
