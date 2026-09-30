@@ -428,11 +428,11 @@ const els = {
   snapshotCloseBtn: document.querySelector("#snapshotCloseBtn"),
 };
 
-let appVersion = "v0.0.47";
+let appVersion = "v0.0.48";
 function setDeviceFooter(status = "Standby") {
   if (!els.deviceFooter) return;
   els.deviceFooter.dataset.status = status;
-  els.deviceFooter.textContent = `${status} · ${appVersion}`;
+  els.deviceFooter.textContent = status;
 }
 
 function setStatusLine(status = "Standby") {
@@ -931,7 +931,7 @@ function renderDevices() {
 
   els.deviceList.innerHTML = [...devicesByModel.entries()].map(([model, devices], groupIndex) => `
     <section class="model-group model-group-${groupIndex % 5}">
-      <header class="model-group-header">
+      <header class="model-group-header" data-model-group="${escapeHtml(model)}" role="button" tabindex="0" title="Click to select/deselect all ${escapeHtml(model)} devices">
         <strong>${escapeHtml(model)}</strong>
         <span>${devices.length} device${devices.length === 1 ? "" : "s"}</span>
       </header>
@@ -973,6 +973,31 @@ function renderDevices() {
       }).join("")}
     </section>
   `).join("");
+
+  els.deviceList.querySelectorAll(".model-group-header").forEach((header) => {
+    const model = header.dataset.modelGroup;
+    const toggleModel = () => {
+      const groupDevices = state.devices.filter(
+        (d) => (d.model || "UNKNOWN_MODEL") === model && d.state === "device" && !d.busy && !d.busy_reason
+      );
+      if (!groupDevices.length) return;
+      const allSelected = groupDevices.every((d) => state.selected.has(d.serial));
+      if (allSelected) {
+        groupDevices.forEach((d) => state.selected.delete(d.serial));
+      } else {
+        groupDevices.forEach((d) => state.selected.add(d.serial));
+      }
+      state.manualSelection = true;
+      render();
+    };
+    header.addEventListener("click", toggleModel);
+    header.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        toggleModel();
+      }
+    });
+  });
 
   els.deviceList.querySelectorAll(".device-card").forEach((card) => {
     card.addEventListener("click", () => {
