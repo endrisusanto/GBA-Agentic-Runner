@@ -1,6 +1,7 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
+import { getVersion } from "@tauri-apps/api/app";
 import "./styles.css";
 import agenticLogo from "./assets/agentic.png";
 
@@ -151,27 +152,18 @@ const app = document.querySelector("#app");
 app.innerHTML = `
   <div class="shell">
     <header class="titlebar">
-      <div class="brand">
+      <div class="brand" id="brandGroup" role="button" tabindex="0" title="Settings & Preflight Check (Click for Settings)">
         <img class="brand-mark" src="${agenticLogo}" alt="GBA" />
         <div>
-          <h1>GBA Agentic AI Worker</h1>
-          <p>AI Worker</p>
+          <h1>GBA AGENTIC RUNNER</h1>
+          <p>Automated Device Test Orchestration Engine</p>
         </div>
       </div>
       <div class="titlebar-actions">
-        <div class="overall-progress" id="overallProgress" title="Overall run progress" aria-label="Overall run progress">
-          <svg viewBox="0 0 36 36" aria-hidden="true">
-            <circle class="overall-progress__bg" cx="18" cy="18" r="15"></circle>
-            <circle class="overall-progress__value" id="overallProgressCircle" cx="18" cy="18" r="15"></circle>
-          </svg>
-          <span id="overallProgressText">0%</span>
-        </div>
-        <button class="icon-button settings-button" id="settingsBtn" title="Settings" aria-label="Settings">
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M12 15.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z"></path>
-          <path d="M19.4 15a1.8 1.8 0 0 0 .36 1.98l.04.04a2 2 0 0 1-2.82 2.82l-.04-.04A1.8 1.8 0 0 0 15 19.44a1.8 1.8 0 0 0-1 .56 1.8 1.8 0 0 0-.52 1.28V21.4a2 2 0 0 1-4 0v-.08A1.8 1.8 0 0 0 8 19.44a1.8 1.8 0 0 0-1.98.36l-.04.04a2 2 0 0 1-2.82-2.82l.04-.04A1.8 1.8 0 0 0 3.56 15a1.8 1.8 0 0 0-.56-1 1.8 1.8 0 0 0-1.28-.52H1.6a2 2 0 0 1 0-4h.08A1.8 1.8 0 0 0 3.56 8a1.8 1.8 0 0 0-.36-1.98l-.04-.04a2 2 0 0 1 2.82-2.82l.04.04A1.8 1.8 0 0 0 8 3.56a1.8 1.8 0 0 0 1-.56 1.8 1.8 0 0 0 .52-1.28V1.6a2 2 0 0 1 4 0v.08A1.8 1.8 0 0 0 15 3.56a1.8 1.8 0 0 0 1.98-.36l.04-.04a2 2 0 0 1 2.82 2.82l-.04.04A1.8 1.8 0 0 0 19.44 8a1.8 1.8 0 0 0 .56 1 1.8 1.8 0 0 0 1.28.52h.12a2 2 0 0 1 0 4h-.08A1.8 1.8 0 0 0 19.4 15Z"></path>
-        </svg>
-        </button>
+        <span class="header-progress-text" id="overallProgressText"></span>
+      </div>
+      <div class="header-progress-line">
+        <div class="header-progress-fill" id="overallProgressFill" style="width: 0%;"></div>
       </div>
     </header>
 
@@ -362,6 +354,7 @@ app.innerHTML = `
 `;
 
 const els = {
+  brandGroup: document.querySelector("#brandGroup"),
   deviceList: document.querySelector("#deviceList"),
   testArea: document.querySelector("#testArea"),
   flowMapPanel: document.querySelector(".flow-map"),
@@ -385,10 +378,8 @@ const els = {
   unselectBtn: document.querySelector("#unselectBtn"),
   resetBusyBtn: document.querySelector("#resetBusyBtn"),
   refreshBtn: document.querySelector("#refreshBtn"),
-  overallProgress: document.querySelector("#overallProgress"),
-  overallProgressCircle: document.querySelector("#overallProgressCircle"),
+  overallProgressFill: document.querySelector("#overallProgressFill"),
   overallProgressText: document.querySelector("#overallProgressText"),
-  settingsBtn: document.querySelector("#settingsBtn"),
   settingsModal: document.querySelector("#settingsModal"),
   settingsCloseBtn: document.querySelector("#settingsCloseBtn"),
   preflightBtn: document.querySelector("#preflightBtn"),
@@ -437,6 +428,32 @@ const els = {
   snapshotCloseBtn: document.querySelector("#snapshotCloseBtn"),
 };
 
+let appVersion = "v0.0.47";
+function setDeviceFooter(status = "Standby") {
+  if (!els.deviceFooter) return;
+  els.deviceFooter.dataset.status = status;
+  els.deviceFooter.textContent = `${status} · ${appVersion}`;
+}
+
+function setStatusLine(status = "Standby") {
+  if (!els.statusLine) return;
+  els.statusLine.dataset.status = status;
+  els.statusLine.textContent = `${status} · ${appVersion}`;
+}
+
+if (isTauri && typeof getVersion === "function") {
+  getVersion().then((v) => {
+    if (v) {
+      appVersion = `v${v}`;
+      setDeviceFooter(els.deviceFooter.dataset.status || "Standby");
+      setStatusLine(els.statusLine.dataset.status || "Standby");
+    }
+  }).catch(() => {});
+}
+
+setDeviceFooter("Standby");
+setStatusLine("Standby");
+
 els.retryInput.value = state.retryCount;
 els.timeoutInput.value = state.timeoutSecs;
 
@@ -449,7 +466,15 @@ els.clearLogBtn.addEventListener("click", () => {
 els.clearTableBtn.addEventListener("click", clearInactiveTableCards);
 els.clearSuitesBtn.addEventListener("click", clearInactiveSuites);
 els.unselectBtn.addEventListener("click", toggleAllReadyDevices);
-els.settingsBtn.addEventListener("click", openSettings);
+if (els.brandGroup) {
+  els.brandGroup.addEventListener("click", openSettings);
+  els.brandGroup.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      openSettings();
+    }
+  });
+}
 els.settingsCloseBtn.addEventListener("click", closeSettings);
 els.settingsModal.addEventListener("click", (event) => {
   if (event.target === els.settingsModal) closeSettings();
@@ -541,7 +566,7 @@ subscribe("gba-run-started", async (event) => {
   
   state.running = true;
   els.cancelBtn.disabled = false;
-  els.statusLine.textContent = "Running";
+  setStatusLine("Running");
   
   await refreshDevices(true);
 });
@@ -610,7 +635,7 @@ subscribe("gba-run-finished", (event) => {
   els.openResultBtn.disabled = !state.resultDir;
   els.resultPill.disabled = !state.resultDir;
   els.resultPill.textContent = state.resultDir ? "Open" : "None";
-  els.statusLine.textContent = payload.exit_code === 0 ? "Completed" : "Finished with issue";
+  setStatusLine(payload.exit_code === 0 ? "Completed" : "Finished with issue");
   appendRunSummaryToLog(payload.run_id || "legacy");
   appendRunnerLogForRun(payload.run_id || "legacy", `[AI Worker] Finished exit=${payload.exit_code} result=${state.resultDir || "N/A"}`);
   if (Number(payload.exit_code) !== 0) showInfoModal("Run Finished With Issue", `Exit code ${payload.exit_code}`, [`Result: ${state.resultDir || "N/A"}`], "error");
@@ -649,7 +674,7 @@ async function syncBrowserStatus() {
     const status = await api("/api/status");
     syncBrowserRunState(status);
     await syncBrowserLogs();
-    els.statusLine.textContent = state.running ? "Running" : status.status === "DONE" ? "Completed" : "Standby";
+    setStatusLine(state.running ? "Running" : status.status === "DONE" ? "Completed" : "Standby");
     await refreshDevices(true);
     renderLogTabs();
     renderFlowMap();
@@ -820,7 +845,7 @@ async function reconcileAutoRoot() {
 
 async function refreshDevices(silent = false) {
   if (!silent) appendLog("[adb] Refreshing devices...");
-  els.deviceFooter.textContent = "Scanning";
+  setDeviceFooter("Scanning");
   try {
     const devices = await invoke("list_devices");
     for (const device of devices) {
@@ -837,7 +862,7 @@ async function refreshDevices(silent = false) {
   }
   if (!state.selected.size) selectLaundryModelFromResults();
   renderDevices();
-  els.deviceFooter.textContent = `${state.devices.length} detected`;
+  setDeviceFooter(`${state.devices.length} detected`);
   
   // Dynamically update log flow titles if they have NO_MODEL
   state.logFlows.forEach((flow, runId) => {
@@ -923,7 +948,7 @@ function renderDevices() {
           <span class="check-dot ${selected ? "checked" : ""} ${isBusy ? "loading" : ""}">${isBusy ? "" : (selected ? "✓" : "")}</span>
           <div>
             <strong>${escapeHtml(device.model || device.serial)}</strong>
-            <p><b>${escapeHtml(device.serial)}</b> <span>${escapeHtml(device.state)}</span></p>
+            <p><b>${escapeHtml(device.serial)}</b> <span class="connection-status ${ready ? "connected" : "disconnected"}" title="${escapeHtml(device.state)}"></span></p>
           </div>
           <div class="device-inline-actions">
             <span class="type-pill ${isBusy ? "busy" : (device.is_userdebug ? "debug" : "")}">${badge}</span>
@@ -1047,11 +1072,30 @@ function renderSelectedStrip() {
   `;
 }
 
+function formatLogLineHtml(line) {
+  const str = String(line || "");
+  const escaped = escapeHtml(str);
+  if (/\b(error|failed|fail|failure|exception|fatal|panic|cannot|crash)\b/i.test(str)) {
+    return `<span class="log-err">${escaped}</span>`;
+  }
+  if (/\b(warn|warning|skip|skipped|retry|retrying)\b/i.test(str)) {
+    return `<span class="log-warn">${escaped}</span>`;
+  }
+  if (/\b(pass|passed|success|completed|ok|test done)\b/i.test(str)) {
+    return `<span class="log-ok">${escaped}</span>`;
+  }
+  if (/(\[runner\]|\[info\]|\[adb\]|starting|device|connected)/i.test(str)) {
+    return `<span class="log-info">${escaped}</span>`;
+  }
+  return escaped;
+}
+
 function renderLog() {
   renderLogTabs();
   const flow = state.logFlows.get(state.activeLogFlow);
   const tab = flow?.tabs?.get(state.activeLogSubtab);
-  els.logBox.textContent = (tab?.lines || []).slice(-600).join("\n");
+  const lines = (tab?.lines || []).slice(-600);
+  els.logBox.innerHTML = lines.map(formatLogLineHtml).join("\n");
 }
 
 function renderLogTabs() {
@@ -1567,13 +1611,13 @@ function renderOverallProgress(statuses) {
   const total = statuses.length;
   const done = statuses.filter((status) => doneStatuses.has(status.status)).length;
   const pct = total ? Math.round((done / total) * 100) : 0;
-  const circumference = 2 * Math.PI * 15;
-  els.overallProgressCircle.style.strokeDasharray = circumference;
-  els.overallProgressCircle.style.strokeDashoffset = circumference * (1 - pct / 100);
-  els.overallProgressCircle.style.stroke = total && done === total ? "var(--green)" : "var(--cyan)";
-  els.overallProgressText.textContent = `${pct}%`;
-  els.overallProgress.title = total ? `Overall run progress: ${done}/${total} suites` : "Overall run progress: no suites";
-  els.overallProgress.setAttribute("aria-label", els.overallProgress.title);
+  if (els.overallProgressFill) {
+    els.overallProgressFill.style.width = `${pct}%`;
+    els.overallProgressFill.style.background = total && done === total ? "var(--green)" : "var(--cyan)";
+  }
+  if (els.overallProgressText) {
+    els.overallProgressText.textContent = total ? `${pct}% (${done}/${total})` : "";
+  }
 }
 
 function compareSuiteStatuses(a, b) {
@@ -1599,7 +1643,7 @@ function renderMetrics() {
   const elapsed = formatDuration(state.runElapsedSecs || 0);
   els.runtimeMetric.textContent = elapsed;
   els.elapsedPill.textContent = elapsed;
-  if (state.running) els.statusLine.textContent = `Running ${elapsed}`;
+  if (state.running) setStatusLine(`Running ${elapsed}`);
   renderCurrentRun(statuses, elapsed);
 }
 
@@ -1910,12 +1954,12 @@ async function runSelected() {
     await chooseLaundryZip();
     if (state.laundrySources.length) {
       appendLog("[runner] Laundry zip loaded. Select testcase rows, then click Run Selected again.");
-      els.statusLine.textContent = "Select laundry testcase rows";
+      setStatusLine("Select laundry testcase rows");
       return;
     }
     if (!state.laundrySources.length) {
       appendLog("[runner] Laundry flow needs zip file.");
-      els.statusLine.textContent = "Laundry zip required";
+      setStatusLine("Laundry zip required");
       showInfoModal("Laundry Zip Required", "Pick a laundry result zip before running.", ["No zip selected."], "error");
       return;
     }
@@ -1926,13 +1970,13 @@ async function runSelected() {
   const validation = validateRun(mode, userDevices, userdebugDevices);
   if (validation) {
     appendLog(`[runner] ${validation}`);
-    els.statusLine.textContent = validation;
+    setStatusLine(validation);
     showInfoModal("Run Blocked", "Fix this before running.", [validation], "error");
     return;
   }
   if (isLaundryMode(runMode) && state.laundryResults.length && state.selectedLaundryResults.size === 0) {
     appendLog("[runner] Select at least one laundry result row.");
-    els.statusLine.textContent = "Laundry result selection required";
+    setStatusLine("Laundry result selection required");
     showInfoModal("No Laundry Rows Selected", "Select at least one row from the run table.", ["All rows are currently unchecked."], "error");
     return;
   }
@@ -1983,7 +2027,7 @@ async function runSelected() {
   els.openResultBtn.disabled = true;
   els.resultPill.disabled = true;
   els.resultPill.textContent = "None";
-  els.statusLine.textContent = "Running";
+  setStatusLine("Running");
   render();
 
   appendLog(`[runner] ${runMode}: split into ${groups.length} fingerprint shard group(s).`);
@@ -2050,7 +2094,7 @@ async function runSelected() {
   state.captureUiLogs = false;
   state.pendingUiLogs = [];
   els.cancelBtn.disabled = state.activeRuns.size === 0;
-  els.statusLine.textContent = state.running ? "Running" : "Run failed";
+  setStatusLine(state.running ? "Running" : "Run failed");
   render();
   if (!state.running) await refreshDevices();
 }
@@ -2114,7 +2158,7 @@ function clearLocalBusy(serials) {
 async function emergencyStop(reason = "Emergency stop", runId = null) {
   appendLog(`[runner] ${reason}: stopping ${runId ? `run ${runId}` : "all test processes"}.`);
   els.cancelBtn.disabled = true;
-  els.statusLine.textContent = "Emergency stop";
+  setStatusLine("Emergency stop");
   try {
     await invoke("cancel_run", { runId });
     const serials = runId
