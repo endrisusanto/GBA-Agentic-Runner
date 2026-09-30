@@ -1,6 +1,6 @@
 [package]
 name = "gba-agentic-runner"
-version = "0.0.49"
+version = "0.0.50"
 description = "GBA Agentic Runner"
 authors = ["GBA Automation"]
 edition = "2021"
