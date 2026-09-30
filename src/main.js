@@ -1030,10 +1030,17 @@ function renderDevices() {
 }
 
 function renderTestArea() {
+  const runningModes = new Set(
+    state.running
+      ? [...state.activeRuns].map((runId) => state.flows.get(runId)?.mode).filter(Boolean)
+      : []
+  );
+
   els.testArea.innerHTML = TEST_MODES.map((mode) => {
-    const selected = state.selectedMode === mode.id;
+    const isRunning = state.running && runningModes.has(mode.id);
+    const isSelected = state.selectedMode === mode.id && !isRunning;
     return `
-      <button class="mode-card ${selected ? "selected" : ""}" data-mode="${escapeHtml(mode.id)}">
+      <button class="mode-card ${isSelected ? "selected" : ""} ${isRunning ? "running" : ""}" data-mode="${escapeHtml(mode.id)}">
         <strong>${escapeHtml(mode.name)}</strong>
       </button>
     `;
@@ -1303,13 +1310,10 @@ function renderFlowMap() {
   const lockedRows = getEffectiveLaundryRows()
     .sort((a, b) => Number(state.activeRuns.has(b.runId)) - Number(state.activeRuns.has(a.runId)));
 
-  // Count elements for tabs
+  // Count elements for tabs: a row is running only if its runId is currently active
   const isRunActive = (row) => {
-    if (state.activeRuns.has(row.runId) || state.runDevices.has(row.runId)) return true;
-    if (row.devices?.split(",").some((serial) => state.localBusy.has(serial))) return true;
-    const statuses = [...state.suiteStatuses.values()].filter((status) => status.run_id === row.runId);
-    if (statuses.some((status) => ["Starting", "Running", "Waiting", "Copying result", "Waiting device reconnect"].includes(status.status))) return true;
-    return state.running && row.status === "Queued";
+    if (!row.runId) return false;
+    return state.activeRuns.has(row.runId);
   };
   const runningRows = lockedRows.filter(isRunActive);
   const completedRows = lockedRows.filter((row) => !isRunActive(row));
@@ -1332,7 +1336,7 @@ function renderFlowMap() {
       <button class="run-tab-btn ${state.runTableTab === 'preview' ? 'active' : ''}" data-tab="preview">
         Preview ${state.laundrySources.length ? `✓ ${state.laundrySources.length}` : ''}
       </button>
-      <button class="run-tab-btn ${state.runTableTab === 'running' ? 'active' : ''}" data-tab="running">
+      <button class="run-tab-btn ${state.runTableTab === 'running' ? 'active' : ''} ${state.running && runningCount > 0 ? 'running' : ''}" data-tab="running">
         Running (${runningCount})
       </button>
       <button class="run-tab-btn ${state.runTableTab === 'completed' ? 'active' : ''}" data-tab="completed">
@@ -1959,13 +1963,20 @@ async function chooseLaundryZip() {
   }
 
   state.laundryZipPath = state.laundrySources[0]?.path || "";
-  if (!state.laundrySources.length) return;
+  state.runTableTab = "preview";
+  if (!state.laundrySources.length) {
+    renderTestArea();
+    renderFlowMap();
+    return;
+  }
   if (state.laundryWarnings.length) {
     renderPreflight();
     showInfoModal("Mismatched Tools Warning", "Some required tools are mismatched or missing.", state.laundryWarnings, "warning");
   }
   selectLaundryModelFromResults();
+  renderTestArea();
   renderFlowMap();
+  render();
 }
 
 async function runSelected() {

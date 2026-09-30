@@ -444,10 +444,121 @@ h2 {
   }
 }
 
-.device-card.selected,
-.mode-card.selected {
+.device-card.selected {
   border-color: #ffffff !important;
   animation: heartbeat-white 1.6s ease-in-out infinite;
+}
+
+.mode-card.selected {
+  border-color: #388bfd !important;
+  background: #1c2738 !important;
+  color: #58a6ff !important;
+  box-shadow: 0 0 0 1px rgba(56, 139, 253, 0.4) !important;
+  animation: none !important;
+}
+
+.mode-card.selected strong {
+  color: #58a6ff !important;
+}
+
+/* Swipe Wave Progress Looping (Running Animation) */
+.mode-card.running,
+.run-tab-btn.running,
+.status-pill.status-running {
+  background: linear-gradient(
+    90deg,
+    #112233 0%,
+    #1f6feb 35%,
+    #79c0ff 50%,
+    #1f6feb 65%,
+    #112233 100%
+  ) !important;
+  background-size: 200% 100% !important;
+  animation: swipe-wave-progress 1.6s infinite linear !important;
+  color: #ffffff !important;
+  border-color: #58a6ff !important;
+  box-shadow: 0 0 12px rgba(31, 111, 235, 0.5) !important;
+}
+
+.mode-card.running strong,
+.run-tab-btn.running,
+.status-pill.status-running {
+  color: #ffffff !important;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.7);
+}
+
+@keyframes swipe-wave-progress {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mode-card.running,
+  .run-tab-btn.running,
+  .status-pill.status-running {
+    animation: none !important;
+    background: #1f6feb !important;
+  }
+}
+
+/* Toggle Switch Component */
+input[type="checkbox"].switch,
+input[type="checkbox"].laundry-result-check,
+#wifiAutoConnectInput {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 30px;
+  height: 16px;
+  background: #21262d;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  position: relative;
+  cursor: pointer;
+  outline: none;
+  transition: background var(--duration-fast) ease, border-color var(--duration-fast) ease;
+  vertical-align: middle;
+  margin: 0 auto;
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+input[type="checkbox"].switch::after,
+input[type="checkbox"].laundry-result-check::after,
+#wifiAutoConnectInput::after {
+  content: "";
+  position: absolute;
+  top: 1px;
+  left: 1px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--muted);
+  transition: transform var(--duration-fast) var(--ease-snappy), background var(--duration-fast) ease;
+}
+
+input[type="checkbox"].switch:checked,
+input[type="checkbox"].laundry-result-check:checked,
+#wifiAutoConnectInput:checked {
+  background: #1f6feb;
+  border-color: #58a6ff;
+}
+
+input[type="checkbox"].switch:checked::after,
+input[type="checkbox"].laundry-result-check:checked::after,
+#wifiAutoConnectInput:checked::after {
+  transform: translateX(14px);
+  background: #ffffff;
+}
+
+input[type="checkbox"].switch:disabled,
+input[type="checkbox"].laundry-result-check:disabled,
+#wifiAutoConnectInput:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
 }
 
 .device-card.disabled {
@@ -937,14 +1048,10 @@ h2 {
 }
 
 .mode-card strong {
-  color: var(--blue);
-  font-size: 12px;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
   white-space: nowrap;
-}
-
-.mode-card.selected strong,
-.mode-card.selected {
-  color: var(--green);
 }
 
 button:not(:disabled):focus-visible,
