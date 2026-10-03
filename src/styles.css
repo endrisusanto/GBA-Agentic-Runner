@@ -100,6 +100,134 @@ input {
   gap: 12px;
 }
 
+/* Animated Preflight Checkmark Widget - Circular icon with visible green checkmark */
+.preflight-status-btn {
+  -webkit-appearance: none !important;
+  appearance: none !important;
+  position: relative;
+  display: inline-flex !important;
+  align-items: center;
+  justify-content: center;
+  width: 32px !important;
+  height: 32px !important;
+  min-width: 32px !important;
+  min-height: 32px !important;
+  max-width: 32px !important;
+  max-height: 32px !important;
+  border-radius: 50% !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  outline: none;
+  background: rgba(16, 185, 129, 0.14) !important;
+  border: 1.5px solid rgba(16, 185, 129, 0.5) !important;
+  cursor: pointer;
+  box-shadow: 0 0 10px rgba(16, 185, 129, 0.2);
+  transition: transform 0.2s cubic-bezier(0.16, 1, 0.3, 1), background-color 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+  user-select: none;
+  flex-shrink: 0;
+  overflow: visible;
+}
+
+.preflight-status-btn:hover {
+  background: rgba(16, 185, 129, 0.25) !important;
+  border-color: rgba(16, 185, 129, 0.85) !important;
+  box-shadow: 0 0 14px rgba(16, 185, 129, 0.45);
+  transform: scale(1.08);
+}
+
+.preflight-status-btn:active {
+  transform: scale(0.92);
+}
+
+.preflight-checkmark-svg {
+  display: block;
+  width: 20px;
+  height: 20px;
+  pointer-events: none;
+}
+
+.preflight-status-btn .checkmark-circle {
+  stroke: #10b981;
+  stroke-width: 2.2;
+  transition: stroke 0.2s ease;
+}
+
+.preflight-status-btn .checkmark-check {
+  stroke: #10b981;
+  stroke-width: 2.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  transition: stroke 0.2s ease;
+}
+
+.preflight-status-btn.ok .checkmark-circle,
+.preflight-status-btn.ok .checkmark-check {
+  stroke: #10b981 !important;
+}
+
+.preflight-status-btn.bad {
+  background: rgba(239, 68, 68, 0.15) !important;
+  border-color: rgba(239, 68, 68, 0.6) !important;
+  box-shadow: 0 0 10px rgba(239, 68, 68, 0.25) !important;
+}
+
+.preflight-status-btn.bad .checkmark-circle,
+.preflight-status-btn.bad .checkmark-check {
+  stroke: #ef4444 !important;
+}
+
+.preflight-status-btn.standby {
+  background: rgba(16, 185, 129, 0.1) !important;
+  border-color: rgba(16, 185, 129, 0.35) !important;
+  box-shadow: none !important;
+}
+
+.preflight-status-btn.standby .checkmark-circle {
+  stroke: rgba(16, 185, 129, 0.7) !important;
+}
+
+.preflight-status-btn.standby .checkmark-check {
+  stroke: rgba(16, 185, 129, 0.7) !important;
+  display: block !important;
+}
+
+.preflight-status-btn.checking {
+  border-color: rgba(0, 229, 255, 0.6) !important;
+  background: rgba(0, 229, 255, 0.12) !important;
+  box-shadow: 0 0 10px rgba(0, 229, 255, 0.3) !important;
+}
+
+.preflight-status-btn.checking .preflight-checkmark-svg {
+  animation: spin 0.8s linear infinite !important;
+}
+
+.preflight-status-btn.checking .checkmark-circle {
+  stroke: var(--cyan) !important;
+  stroke-dasharray: 45 35;
+}
+
+.preflight-status-btn.checking .checkmark-check {
+  display: none !important;
+}
+
+.preflight-issue-badge {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: #ef4444;
+  color: #fff;
+  font-size: 9px;
+  font-weight: 900;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1.5px solid #0f1010;
+}
+
 .overall-progress span {
   position: absolute;
   inset: 0;
@@ -420,8 +548,7 @@ h2 {
   background: #4a2029;
 }
 
-.device-card,
-.mode-card {
+.device-card {
   width: 100%;
   text-align: left;
   border: 1px solid var(--line);
@@ -431,6 +558,22 @@ h2 {
   padding: 12px;
   cursor: pointer;
   transition: border-color var(--duration-fast) ease, box-shadow var(--duration-fast) ease;
+}
+
+.mode-card {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.03);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 5px 8px;
+  cursor: pointer;
+  transition: all var(--duration-fast) var(--ease-snappy);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  min-height: 34px;
 }
 
 @keyframes heartbeat-white {
@@ -450,10 +593,10 @@ h2 {
 }
 
 .mode-card.selected {
-  border-color: #388bfd !important;
-  background: #1c2738 !important;
+  border-color: rgba(88, 166, 255, 0.6) !important;
+  background: linear-gradient(180deg, rgba(31, 111, 235, 0.28) 0%, rgba(17, 34, 51, 0.65) 100%) !important;
   color: #58a6ff !important;
-  box-shadow: 0 0 0 1px rgba(56, 139, 253, 0.4) !important;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.2), 0 2px 8px rgba(0, 0, 0, 0.35) !important;
   animation: none !important;
 }
 
@@ -889,19 +1032,6 @@ input[type="checkbox"].laundry-result-check:disabled,
   text-align: center;
 }
 
-.test-area {
-  flex: 0 0 auto;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 6px 12px;
-  background: var(--panel);
-  border-bottom: 1px solid var(--line-soft);
-  overflow-x: auto;
-  overflow-y: hidden;
-  scrollbar-width: thin;
-  scrollbar-color: var(--line) transparent;
-}
 
 .workspace-meta-bar {
   flex: 0 0 auto;
@@ -1159,6 +1289,95 @@ body.resizing-flow {
   gap: 10px;
   width: 100%;
   min-width: 0;
+}
+
+.laundry-scan-progress-banner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  background: rgba(0, 229, 255, 0.08);
+  border: 1px solid rgba(0, 229, 255, 0.25);
+  border-radius: 7px;
+  margin-bottom: 10px;
+}
+
+.scan-spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(0, 229, 255, 0.2);
+  border-top-color: var(--cyan);
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  flex-shrink: 0;
+}
+
+.scan-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.scan-text strong {
+  font-size: 11px;
+  color: var(--cyan);
+  font-weight: 800;
+}
+
+.scan-text span {
+  font-size: 10px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.skeleton-card {
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  background: rgba(255, 255, 255, 0.02) !important;
+  border: 1px dashed rgba(255, 255, 255, 0.15) !important;
+}
+
+.skeleton-header {
+  height: 18px;
+  width: 35%;
+  border-radius: 4px;
+}
+
+.skeleton-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.skeleton-row {
+  height: 26px;
+  width: 100%;
+  border-radius: 4px;
+}
+
+.shimmer {
+  background: linear-gradient(
+    90deg,
+    rgba(255, 255, 255, 0.03) 0%,
+    rgba(255, 255, 255, 0.09) 50%,
+    rgba(255, 255, 255, 0.03) 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+}
+
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+
+@keyframes spin {
+  to { transform: rotate(360deg); }
 }
 
 .laundry-table-card {
@@ -2287,7 +2506,7 @@ body.resizing-flow {
 }
 
 /* Boxy Design System Tokens (antislop-ui) */
-button,
+button:not(.preflight-status-btn),
 input,
 .type-pill,
 .result-pill,
@@ -2324,8 +2543,92 @@ button:not(:disabled):active {
   transition: transform 90ms var(--ease-snappy);
 }
 
-.test-area .mode-card {
+.test-area {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: stretch;
+  gap: 8px;
+  padding: 6px 12px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line-soft);
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: thin;
+  scrollbar-color: var(--line) transparent;
+}
+
+.mode-segmented-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  background: rgba(0, 0, 0, 0.22);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  border-radius: 9px;
+  padding: 4px 6px;
+}
+
+.mode-segmented-group.laundry-group {
+  flex: 1.15 1 auto;
+}
+
+.mode-segmented-group.direct-group {
   flex: 1 1 auto;
+}
+
+.mode-group-header {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 2px;
+  line-height: 1;
+}
+
+.mode-group-icon {
+  font-size: 10px;
+  opacity: 0.85;
+}
+
+.mode-group-title {
+  font-size: 8.5px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  color: var(--muted);
+}
+
+.mode-group-pills {
+  display: flex;
+  gap: 4px;
+  width: 100%;
+  flex: 1;
+}
+
+.test-area .mode-card {
+  flex: 1 1 0;
+  min-width: 0;
+}
+
+.mode-card:hover:not(.selected):not(.running) {
+  background: rgba(255, 255, 255, 0.06);
+  border-color: rgba(255, 255, 255, 0.15);
+  color: #ffffff;
+}
+
+.mode-subplan-badge {
+  font-size: 8px;
+  font-weight: 700;
+  color: rgba(255, 255, 255, 0.4);
+  font-family: monospace;
+  white-space: nowrap;
+  line-height: 1;
+  margin-top: 1px;
+  letter-spacing: 0.2px;
+  transition: color var(--duration-fast) ease;
+}
+
+.mode-card.selected .mode-subplan-badge {
+  color: #79c0ff !important;
+  text-shadow: 0 0 6px rgba(121, 192, 255, 0.4);
 }
 
 /* Run Table Tabs Styles */

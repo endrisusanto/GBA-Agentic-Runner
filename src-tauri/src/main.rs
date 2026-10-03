@@ -162,6 +162,7 @@ struct LaundryResultInfo {
     failed: u64,
     suite_version: String,
     result_dir: String,
+    model: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -260,58 +261,62 @@ fn default_auto_root() -> Result<String, String> {
 }
 
 #[tauri::command]
-fn preflight(auto_root: Option<String>) -> Result<Vec<String>, String> {
-    let root = resolve_auto_root(auto_root)?;
-    let mut lines = vec![format!("Root: {}", root.display())];
-    match prepare_ghidra_for_sts() {
-        Ok(message) => lines.push(format!("OK Ghidra: {}", message.trim())),
-        Err(error) => lines.push(format!("MISS Ghidra: {error}")),
-    }
-    lines.push(check_command("adb"));
-    lines.push(check_command("java"));
-    lines.push(check_dir("CTS", root.join("CTS")));
-    lines.push(check_dir("GTS", root.join("GTS")));
-    lines.push(check_dir("STS", root.join("STS")));
-    lines.push(check_dir("Results", root.join("Results")));
+async fn preflight(auto_root: Option<String>) -> Result<Vec<String>, String> {
+    tokio::task::spawn_blocking(move || {
+        let root = resolve_auto_root(auto_root)?;
+        let mut lines = vec![format!("Root: {}", root.display())];
+        match prepare_ghidra_for_sts() {
+            Ok(message) => lines.push(format!("OK Ghidra: {}", message.trim())),
+            Err(error) => lines.push(format!("MISS Ghidra: {error}")),
+        }
+        lines.push(check_command("adb"));
+        lines.push(check_command("java"));
+        lines.push(check_dir("CTS", root.join("CTS")));
+        lines.push(check_dir("GTS", root.join("GTS")));
+        lines.push(check_dir("STS", root.join("STS")));
+        lines.push(check_dir("Results", root.join("Results")));
 
-    let gts_versions = available_suite_versions(&root, "GTS", "android-gts");
-    if gts_versions.is_empty() {
-        lines.push("MISS GTS/*/android-gts".to_string());
-    }
-    for version in gts_versions {
-        let gts_root = root.join("GTS").join(&version).join("android-gts");
-        lines.push(check_dir(&format!("GTS/{version}/android-gts"), &gts_root));
-        lines.push(check_file(
-            &format!("GTS/{version}/tools/gts-tradefed"),
-            gts_root.join("tools/gts-tradefed"),
-        ));
-    }
-    if let Ok(gts_root) = resolve_gts_root(&root, "") {
-        let version = gts_root
-            .parent()
-            .and_then(Path::file_name)
-            .and_then(|name| name.to_str())
-            .unwrap_or("default");
-        lines.push(check_file(
-            &format!("GTS/{version}/subplans/gtsmr.xml"),
-            gts_root.join("subplans/gtsmr.xml"),
-        ));
-    }
+        let gts_versions = available_suite_versions(&root, "GTS", "android-gts");
+        if gts_versions.is_empty() {
+            lines.push("MISS GTS/*/android-gts".to_string());
+        }
+        for version in gts_versions {
+            let gts_root = root.join("GTS").join(&version).join("android-gts");
+            lines.push(check_dir(&format!("GTS/{version}/android-gts"), &gts_root));
+            lines.push(check_file(
+                &format!("GTS/{version}/tools/gts-tradefed"),
+                gts_root.join("tools/gts-tradefed"),
+            ));
+        }
+        if let Ok(gts_root) = resolve_gts_root(&root, "") {
+            let version = gts_root
+                .parent()
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str())
+                .unwrap_or("default");
+            lines.push(check_file(
+                &format!("GTS/{version}/subplans/gtsmr.xml"),
+                gts_root.join("subplans/gtsmr.xml"),
+            ));
+        }
 
-    let cts_versions = available_suite_versions(&root, "CTS", "android-cts");
-    if cts_versions.is_empty() {
-        lines.push("MISS CTS/*/android-cts".to_string());
-    }
-    for version in cts_versions {
-        let cts_root = root.join("CTS").join(&version).join("android-cts");
-        lines.push(check_dir(&format!("CTS/{version}/android-cts"), &cts_root));
-        lines.push(check_file(
-            &format!("CTS/{version}/tools/cts-tradefed"),
-            cts_root.join("tools/cts-tradefed"),
-        ));
-    }
+        let cts_versions = available_suite_versions(&root, "CTS", "android-cts");
+        if cts_versions.is_empty() {
+            lines.push("MISS CTS/*/android-cts".to_string());
+        }
+        for version in cts_versions {
+            let cts_root = root.join("CTS").join(&version).join("android-cts");
+            lines.push(check_dir(&format!("CTS/{version}/android-cts"), &cts_root));
+            lines.push(check_file(
+                &format!("CTS/{version}/tools/cts-tradefed"),
+                cts_root.join("tools/cts-tradefed"),
+            ));
+        }
 
-    Ok(lines)
+        Ok(lines)
+    })
+    .await
+    .map_err(|err| format!("Task execution error: {err}"))?
 }
 
 #[tauri::command]
@@ -385,118 +390,128 @@ fn generate_ro_xml(serial: String, output_dir: String) -> Result<String, String>
 }
 
 #[tauri::command]
-fn analyze_laundry_zip(zip_path: String) -> Result<Vec<LaundryResultInfo>, String> {
-    let zip_path = PathBuf::from(zip_path);
-    if !zip_path.is_file() {
-        return Err(format!("Laundry zip not found: {}", zip_path.display()));
-    }
+async fn analyze_laundry_zip(zip_path: String) -> Result<Vec<LaundryResultInfo>, String> {
+    tokio::task::spawn_blocking(move || {
+        let zip_path = PathBuf::from(zip_path);
+        if !zip_path.is_file() {
+            return Err(format!("Laundry zip not found: {}", zip_path.display()));
+        }
 
-    let temp = tempfile::Builder::new()
-        .prefix("gba-laundry-preview-")
-        .tempdir()
-        .map_err(|err| format!("Cannot create laundry preview dir: {err}"))?;
-    extract_zip_safe(&zip_path, temp.path())?;
-    extract_nested_zips(temp.path())?;
+        let temp = tempfile::Builder::new()
+            .prefix("gba-laundry-preview-")
+            .tempdir()
+            .map_err(|err| format!("Cannot create laundry preview dir: {err}"))?;
+        extract_zip_safe(&zip_path, temp.path())?;
+        extract_nested_zips(temp.path())?;
 
-    let mut rows = scan_laundry_result_infos(temp.path())?;
-    rows.sort_by(|a, b| {
-        a.suite
-            .cmp(&b.suite)
-            .then(a.suite_version.cmp(&b.suite_version))
-            .then(a.result_dir.cmp(&b.result_dir))
-    });
-    Ok(rows)
+        let mut rows = scan_laundry_result_infos(temp.path())?;
+        rows.sort_by(|a, b| {
+            a.suite
+                .cmp(&b.suite)
+                .then(a.suite_version.cmp(&b.suite_version))
+                .then(a.result_dir.cmp(&b.result_dir))
+        });
+        Ok(rows)
+    })
+    .await
+    .map_err(|err| format!("Task execution error: {err}"))?
 }
 
 #[tauri::command]
-fn check_laundry_mismatches(auto_root: String, zip_path: String) -> Result<Vec<String>, String> {
-    let root = resolve_auto_root(Some(auto_root))?;
-    let zip_path = PathBuf::from(zip_path);
-    if !zip_path.is_file() {
-        return Err(format!("Laundry zip not found: {}", zip_path.display()));
-    }
+async fn check_laundry_mismatches(auto_root: String, zip_path: String) -> Result<Vec<String>, String> {
+    tokio::task::spawn_blocking(move || {
+        let root = resolve_auto_root(Some(auto_root))?;
+        let zip_path = PathBuf::from(zip_path);
+        if !zip_path.is_file() {
+            return Err(format!("Laundry zip not found: {}", zip_path.display()));
+        }
 
-    let temp = tempfile::Builder::new()
-        .prefix("gba-laundry-mismatch-check-")
-        .tempdir()
-        .map_err(|err| format!("Cannot create temp dir: {err}"))?;
-    extract_zip_safe(&zip_path, temp.path())?;
-    extract_nested_zips(temp.path())?;
+        let temp = tempfile::Builder::new()
+            .prefix("gba-laundry-mismatch-check-")
+            .tempdir()
+            .map_err(|err| format!("Cannot create temp dir: {err}"))?;
+        extract_zip_safe(&zip_path, temp.path())?;
+        extract_nested_zips(temp.path())?;
 
-    let (cts_results, gts_results, sts_results) = scan_laundry_results(temp.path());
-    let mut warnings = Vec::new();
+        let (cts_results, gts_results, sts_results) = scan_laundry_results(temp.path());
+        let mut warnings = Vec::new();
 
-    let suites = vec![
-        ("CTS", &cts_results),
-        ("GTS", &gts_results),
-        ("STS", &sts_results),
-    ];
+        let suites = vec![
+            ("CTS", &cts_results),
+            ("GTS", &gts_results),
+            ("STS", &sts_results),
+        ];
 
-    for (suite, result_dirs) in suites {
-        for dir in result_dirs {
-            let xml_path = dir.join("test_result.xml");
-            if !xml_path.is_file() {
-                continue;
-            }
-            let Some((name, version, build)) = get_suite_info_from_xml(&xml_path) else {
-                continue;
-            };
+        for (suite, result_dirs) in suites {
+            for dir in result_dirs {
+                let xml_path = dir.join("test_result.xml");
+                if !xml_path.is_file() {
+                    continue;
+                }
+                let Some((name, version, build)) = get_suite_info_from_xml(&xml_path) else {
+                    continue;
+                };
 
-            // Try to resolve the suite root
-            let suite_root = if suite == "CTS" || suite == "GTS" {
-                if let Some(v) = suite_version_from_result(dir) {
-                    if suite == "CTS" {
-                        resolve_cts_root(&root, &v).ok()
+                // Try to resolve the suite root
+                let suite_root = if suite == "CTS" || suite == "GTS" {
+                    if let Some(v) = suite_version_from_result(dir) {
+                        if suite == "CTS" {
+                            resolve_cts_root(&root, &v).ok()
+                        } else {
+                            resolve_gts_root(&root, &v).ok()
+                        }
                     } else {
-                        resolve_gts_root(&root, &v).ok()
+                        None
                     }
+                } else if suite == "STS" {
+                    Some(root.join("STS"))
                 } else {
                     None
-                }
-            } else {
-                None
-            };
+                };
 
-            // If we could not resolve it or it resolved but doesn't exist, we fall back to generic suite folder
-            let suite_root = suite_root.unwrap_or_else(|| root.join(suite));
+                // If we could not resolve it or it resolved but doesn't exist, we fall back to generic suite folder
+                let suite_root = suite_root.unwrap_or_else(|| root.join(suite));
 
-            let version_txt = suite_root.join("tools/version.txt");
-            let local_version = if version_txt.is_file() {
-                fs::read_to_string(&version_txt)
-                    .map(|s| s.trim().to_string())
-                    .unwrap_or_default()
-            } else {
-                String::new()
-            };
+                let version_txt = suite_root.join("tools/version.txt");
+                let local_version = if version_txt.is_file() {
+                    fs::read_to_string(&version_txt)
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_default()
+                } else {
+                    String::new()
+                };
 
-            if !local_version.is_empty() && !build.is_empty() && build != local_version {
-                let normalized_version = suite_version_from_result_version(&version);
-                let local_folder_version = suite_root
-                    .parent()
-                    .and_then(|p| p.file_name())
-                    .and_then(|f| f.to_str())
-                    .unwrap_or("");
-                let is_same_version = !local_folder_version.is_empty()
-                    && normalized_version.as_deref() == Some(local_folder_version);
+                if !local_version.is_empty() && !build.is_empty() && build != local_version {
+                    let normalized_version = suite_version_from_result_version(&version);
+                    let local_folder_version = suite_root
+                        .parent()
+                        .and_then(|p| p.file_name())
+                        .and_then(|f| f.to_str())
+                        .unwrap_or("");
+                    let is_same_version = !local_folder_version.is_empty()
+                        && normalized_version.as_deref() == Some(local_folder_version);
 
-                if !is_same_version {
-                    warnings.push(format!(
-                        "Mismatched tools version for {suite}:\n\
-                         Laundry file has version: {name} {version} ({build})\n\
-                         Local tool has version: ({local_version})\n\
-                         Please align laundry file and local tools.",
-                        suite = suite,
-                        name = name,
-                        version = version,
-                        build = build,
-                        local_version = local_version
-                    ));
+                    if !is_same_version {
+                        warnings.push(format!(
+                            "Mismatched tools version for {suite}:\n\
+                             Laundry file has version: {name} {version} ({build})\n\
+                             Local tool has version: ({local_version})\n\
+                             Please align laundry file and local tools.",
+                            suite = suite,
+                            name = name,
+                            version = version,
+                            build = build,
+                            local_version = local_version
+                        ));
+                    }
                 }
             }
         }
-    }
 
-    Ok(warnings)
+        Ok(warnings)
+    })
+    .await
+    .map_err(|err| format!("Task execution error: {err}"))?
 }
 
 #[tauri::command]
@@ -788,7 +803,7 @@ async fn api_run_suite(
 async fn api_preflight(
     Json(payload): Json<ApiPreflightRequest>,
 ) -> axum::response::Json<serde_json::Value> {
-    match preflight(payload.auto_root) {
+    match preflight(payload.auto_root).await {
         Ok(res) => axum::response::Json(serde_json::json!({ "result": res })),
         Err(e) => axum::response::Json(serde_json::json!({ "error": e })),
     }
@@ -893,7 +908,7 @@ async fn api_set_device_lamp(
 async fn api_analyze_laundry_zip(
     Json(payload): Json<ApiAnalyzeLaundryZipRequest>,
 ) -> axum::response::Json<serde_json::Value> {
-    match analyze_laundry_zip(payload.zip_path) {
+    match analyze_laundry_zip(payload.zip_path).await {
         Ok(res) => axum::response::Json(serde_json::json!({ "result": res })),
         Err(e) => axum::response::Json(serde_json::json!({ "error": e })),
     }
@@ -902,7 +917,7 @@ async fn api_analyze_laundry_zip(
 async fn api_check_laundry_mismatches(
     Json(payload): Json<ApiCheckLaundryMismatchesRequest>,
 ) -> axum::response::Json<serde_json::Value> {
-    match check_laundry_mismatches(payload.auto_root, payload.zip_path) {
+    match check_laundry_mismatches(payload.auto_root, payload.zip_path).await {
         Ok(res) => axum::response::Json(serde_json::json!({ "result": res })),
         Err(e) => axum::response::Json(serde_json::json!({ "error": e })),
     }
@@ -1532,49 +1547,49 @@ fn run_suite_blocking(app: AppHandle, root: PathBuf, request: RunSuiteRequest, r
     let retry_args = retry_args(request.retry_count);
     let mut exit_codes = Vec::new();
 
-    if matches!(request.test_type.as_str(), "STS" | "Laundry SMR") {
-        ensure_ghidra_for_sts(&app)?;
+    if matches!(request.test_type.as_str(), "STS" | "Laundry SMR" | "Laundry") {
+        let has_sts = matches!(request.test_type.as_str(), "STS" | "Laundry SMR") || (!request.userdebug_devices.is_empty() || request.selected_laundry_rows.iter().any(|r| {
+            let suite = r.get("suite").and_then(|v| v.as_str()).unwrap_or("");
+            let testcase = r.get("testcase").and_then(|v| v.as_str()).unwrap_or("");
+            suite.eq_ignore_ascii_case("sts") || testcase.to_uppercase().contains("STS")
+        }));
+        if has_sts {
+            ensure_ghidra_for_sts(&app)?;
+        }
     }
 
     match request.test_type.as_str() {
-        "Laundry SMR" => {
-            let outcome = run_laundry_smr(
-                &app,
-                &root,
-                &session_dir,
-                &log_dir,
-                &request,
-                &model,
-                &pda,
-                &run_id,
-            )?;
-            exit_codes.push(outcome.exit_code);
-        }
-        "Laundry Normal" => {
-            let outcome = run_laundry_normal(
-                &app,
-                &root,
-                &session_dir,
-                &log_dir,
-                &request,
-                &model,
-                &pda,
-                &run_id,
-            )?;
-            exit_codes.push(outcome.exit_code);
-        }
-        "Laundry SKU" => {
-            let outcome = run_laundry_normal(
-                &app,
-                &root,
-                &session_dir,
-                &log_dir,
-                &request,
-                &model,
-                &pda,
-                &run_id,
-            )?;
-            exit_codes.push(outcome.exit_code);
+        "Laundry" | "Laundry Normal" | "Laundry SKU" | "Laundry SMR" => {
+            let has_sts = !request.userdebug_devices.is_empty() || request.selected_laundry_rows.iter().any(|r| {
+                let suite = r.get("suite").and_then(|v| v.as_str()).unwrap_or("");
+                let testcase = r.get("testcase").and_then(|v| v.as_str()).unwrap_or("");
+                suite.eq_ignore_ascii_case("sts") || testcase.to_uppercase().contains("STS")
+            });
+            if has_sts {
+                let outcome = run_laundry_smr(
+                    &app,
+                    &root,
+                    &session_dir,
+                    &log_dir,
+                    &request,
+                    &model,
+                    &pda,
+                    &run_id,
+                )?;
+                exit_codes.push(outcome.exit_code);
+            } else {
+                let outcome = run_laundry_normal(
+                    &app,
+                    &root,
+                    &session_dir,
+                    &log_dir,
+                    &request,
+                    &model,
+                    &pda,
+                    &run_id,
+                )?;
+                exit_codes.push(outcome.exit_code);
+            }
         }
         "Cuci SMR" => {
             let outcome = run_cts_then_gts(
@@ -1850,9 +1865,16 @@ fn run_laundry_normal(
 ) -> Result<SuiteOutcome, String> {
     let devices = &request.user_devices;
     let source = prepare_laundry_source(app, request, session_dir)?;
-    verify_laundry_suite_tools(app, root, devices, &source, &["GTS", "CTS"])?;
-    let label = if request.test_type == "Laundry SKU" { "Laundry SKU" } else { "Laundry Normal" };
-    emit_log(app, format!("[runner] {label}: initial GTS run."));
+    let is_sku = request.selected_laundry_rows.iter().any(|r| {
+        let sub = r.get("subtestcases").and_then(|v| v.as_str()).unwrap_or("");
+        sub.to_lowercase().contains("variant") || sub.to_lowercase().contains("sku")
+    });
+    let is_smr = request.selected_laundry_rows.iter().any(|r| {
+        let sub = r.get("subtestcases").and_then(|v| v.as_str()).unwrap_or("");
+        sub.to_lowercase().contains("smr")
+    });
+    let test_kind = if is_sku { "SKU" } else if is_smr { "SMR" } else { "Normal" };
+    emit_log(app, format!("[runner] Laundry ({test_kind}): initial GTS run."));
     let deviceinfo = run_laundry_initial_gts(
         app,
         root,
@@ -1930,7 +1952,7 @@ fn run_laundry_smr(
     let sts_handle = if request.userdebug_devices.is_empty() {
         None
     } else {
-        emit_log(app, "[runner] Laundry SMR: STS retry starts immediately on userdebug devices.");
+        emit_log(app, "[runner] Laundry (SMR): STS retry starts immediately on userdebug devices.");
         let app_sts = app.clone();
         let root_sts = root.to_path_buf();
         let session_sts = session_dir.to_path_buf();
@@ -1969,7 +1991,7 @@ fn run_laundry_smr(
     };
 
     if !request.user_devices.is_empty() && has_cts_or_gts {
-        emit_log(app, "[runner] Laundry SMR: initial GTS gtsmr run.");
+        emit_log(app, "[runner] Laundry (SMR): initial GTS gtsmr run.");
         let deviceinfo = run_laundry_initial_gts(
             app,
             root,
@@ -2021,7 +2043,7 @@ fn run_laundry_smr(
             )?);
         }
     } else if !has_cts_or_gts {
-        emit_log(app, "[runner] Laundry SMR: STS-only selected, skipping GTS property/gtsmr process.");
+        emit_log(app, "[runner] Laundry (SMR): STS-only selected, skipping GTS property/gtsmr process.");
     }
 
     if let Some(handle) = sts_handle {
@@ -3509,7 +3531,9 @@ fn parse_laundry_result_info(root: &Path, result_dir: &Path, xml_path: &Path) ->
     let reader = BufReader::new(file);
     let mut suite_name = String::new();
     let mut suite_version = String::new();
+    let mut suite_plan = String::new();
     let mut command_line_args = String::new();
+    let mut build_model = String::new();
     let mut start_ms = None;
     let mut end_ms = None;
     let mut passed = 0;
@@ -3522,9 +3546,17 @@ fn parse_laundry_result_info(root: &Path, result_dir: &Path, xml_path: &Path) ->
             saw_result = true;
             suite_name = parse_xml_attribute(&line, "suite_name").unwrap_or_default();
             suite_version = parse_xml_attribute(&line, "suite_version").unwrap_or_default();
+            suite_plan = parse_xml_attribute(&line, "suite_plan")
+                .or_else(|| parse_xml_attribute(&line, "plan"))
+                .unwrap_or_default();
             command_line_args = parse_xml_attribute(&line, "command_line_args").unwrap_or_default();
             start_ms = parse_xml_attribute(&line, "start").and_then(|value| value.parse::<u64>().ok());
             end_ms = parse_xml_attribute(&line, "end").and_then(|value| value.parse::<u64>().ok());
+            if build_model.is_empty() {
+                if let Some(m) = parse_xml_attribute(&line, "build_model") {
+                    build_model = m;
+                }
+            }
         } else if line.contains("<Summary ") {
             passed = parse_xml_attribute(&line, "pass")
                 .and_then(|value| value.parse::<u64>().ok())
@@ -3532,6 +3564,16 @@ fn parse_laundry_result_info(root: &Path, result_dir: &Path, xml_path: &Path) ->
             failed = parse_xml_attribute(&line, "failed")
                 .and_then(|value| value.parse::<u64>().ok())
                 .unwrap_or(0);
+        } else if build_model.is_empty() {
+            if line.contains("<Build ") || line.contains("<BuildInfo ") || line.contains("build_model=") {
+                if let Some(m) = parse_xml_attribute(&line, "build_model") {
+                    build_model = m;
+                }
+            } else if line.contains("name=\"build_model\"") || line.contains("name='build_model'") {
+                if let Some(val) = parse_xml_attribute(&line, "value") {
+                    build_model = val;
+                }
+            }
         }
     }
 
@@ -3551,16 +3593,35 @@ fn parse_laundry_result_info(root: &Path, result_dir: &Path, xml_path: &Path) ->
         .map(|name| name.to_string_lossy().to_string())
         .unwrap_or_else(|| suite.clone());
     let relative = laundry_result_id(root, result_dir);
+
+    let subtestcases = if !command_line_args.trim().is_empty() && command_line_args.trim() != "-" {
+        command_line_args.trim().to_string()
+    } else if !suite_plan.trim().is_empty() && suite_plan.trim() != "-" {
+        format!("{} --subplan {}", suite.to_lowercase(), suite_plan.trim())
+    } else {
+        let result_lower = result_name.to_lowercase();
+        if suite == "GTS" {
+            if result_lower.contains("variant") || result_lower.contains("sku") {
+                "gts --subplan gts-variant".to_string()
+            } else if result_lower.contains("smr") {
+                "gts --subplan gts-smr".to_string()
+            } else {
+                "gts --subplan Normalised".to_string()
+            }
+        } else if suite == "CTS" {
+            "cts --subplan Normalised".to_string()
+        } else if suite == "STS" {
+            "sts-dynamic-incremental".to_string()
+        } else {
+            format!("{} retry", suite.to_lowercase())
+        }
+    };
+
     Ok(Some(LaundryResultInfo {
         id: relative.clone(),
         suite: suite.clone(),
         testcase: format!("{suite} {result_name}"),
-        subtestcases: if command_line_args.trim().is_empty() {
-            "-"
-        } else {
-            command_line_args.trim()
-        }
-        .to_string(),
+        subtestcases,
         status: "Ready".to_string(),
         time: format_xml_duration(start_ms, end_ms),
         total: passed + failed,
@@ -3568,6 +3629,7 @@ fn parse_laundry_result_info(root: &Path, result_dir: &Path, xml_path: &Path) ->
         failed,
         suite_version,
         result_dir: relative,
+        model: build_model,
     }))
 }
 
@@ -4046,19 +4108,13 @@ fn register_log_file(app: &AppHandle, log_file: &Path) {
 }
 
 fn validate_request(request: &RunSuiteRequest) -> Result<(), String> {
-    if request.test_type == "Laundry SMR" {
+    if request.test_type == "Laundry" || request.test_type == "Laundry SMR" {
         validate_laundry_smr_pair(request)?;
     }
+    if (request.test_type == "Laundry" || request.test_type.starts_with("Laundry")) && request.laundry_zip_path.as_ref().is_none_or(|path| path.trim().is_empty()) {
+        return Err(format!("{} needs laundry zip file", request.test_type));
+    }
     match request.test_type.as_str() {
-        "Laundry Normal" | "Laundry SKU" if request.user_devices.is_empty() => {
-            Err(format!("{} needs at least one USER device", request.test_type))
-        }
-        "Laundry Normal" | "Laundry SKU" if !request.userdebug_devices.is_empty() => {
-            Err(format!("{} hanya boleh menggunakan device USER", request.test_type))
-        }
-        "Laundry Normal" | "Laundry SKU" | "Laundry SMR" if request.laundry_zip_path.as_ref().is_none_or(|path| path.trim().is_empty()) => {
-            Err(format!("{} needs laundry zip file", request.test_type))
-        }
         "Cuci SMR" | "MR" | "SKU" if request.user_devices.is_empty() => {
             Err(format!("{} needs at least one non-userdebug device", request.test_type))
         }

@@ -51,55 +51,39 @@ function subscribe(event, handler) {
 
 const TEST_MODES = [
   {
-    id: "Laundry SMR",
-    name: "Laundry SMR",
-    flow: "GTS gtsmr -> CTS filters -> GTS retry / STS retry",
-    description: "Laundry SMR with deviceinfo replacement and retry.",
-    needs: "both",
-    laundry: true,
-  },
-  {
-    id: "Laundry Normal",
-    name: "Laundry Normal",
-    flow: "GTS property -> CTS/GTS retry",
-    description: "Laundry Normal with property deviceinfo replacement.",
-    needs: "user",
-    laundry: true,
-  },
-  {
-    id: "Laundry SKU",
-    name: "Laundry SKU",
-    flow: "GTS property -> CTS/GTS retry",
-    description: "Laundry Normal flow with SKU output labeling.",
+    id: "Laundry",
+    name: "Laundry",
+    flow: "Auto (SMR / SKU / Normal)",
+    description: "Automated Laundry retry pipeline (Auto SMR, SKU, Normal).",
     needs: "user",
     laundry: true,
   },
   {
     id: "MR",
     name: "MR",
-    flow: "CTS normal -> GTS normal",
-    description: "Maintenance Release compatibility sequence.",
+    flow: "Normal",
+    description: "Maintenance Release compatibility sequence (Normal).",
     needs: "user",
   },
   {
     id: "SMR",
     name: "SMR",
-    flow: "CTS/GTS + STS",
-    description: "Security maintenance run with user and userdebug groups.",
+    flow: "SMR",
+    description: "Security maintenance run (SMR).",
     needs: "both",
   },
   {
     id: "SKU",
     name: "SKU",
-    flow: "CTS SKU -> GTS Variant",
-    description: "SKU build validation sequence.",
+    flow: "SKU",
+    description: "SKU build validation sequence (SKU).",
     needs: "user",
   },
   {
     id: "STS",
     name: "STS",
-    flow: "STS dynamic incremental",
-    description: "Security Test Suite for userdebug devices.",
+    flow: "STS",
+    description: "Security Test Suite (STS).",
     needs: "userdebug",
   },
 ];
@@ -115,7 +99,7 @@ const state = {
   timeoutSecs: Number(localStorage.getItem("autoTestTimeout") || "86400"),
   devices: [],
   selected: new Set(),
-  selectedMode: "Laundry SMR",
+  selectedMode: "Laundry",
   laundryZipPath: "",
   laundrySources: [],
   laundryResults: [],
@@ -161,6 +145,13 @@ app.innerHTML = `
       </div>
       <div class="titlebar-actions">
         <span class="header-progress-text" id="overallProgressText"></span>
+        <button class="preflight-status-btn ok" id="preflightStatusBtn" title="Preflight: All tools & suites ready (Click to test / inspect)">
+          <svg class="preflight-checkmark-svg" viewBox="0 0 32 32" width="20" height="20" aria-hidden="true">
+            <circle class="checkmark-circle" cx="16" cy="16" r="13" fill="none" stroke="#10b981" stroke-width="2.5" />
+            <path class="checkmark-check" fill="none" stroke="#10b981" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" d="M9.5 16.5 L14 21 L22.5 11.5" />
+          </svg>
+          <span class="preflight-issue-badge" id="preflightIssueBadge" style="display: none;">0</span>
+        </button>
       </div>
       <div class="header-progress-line">
         <div class="header-progress-fill" id="overallProgressFill" style="width: 0%;"></div>
@@ -185,7 +176,6 @@ app.innerHTML = `
         <button class="run-button" id="runBtn">Run Selected</button>
         <button class="ghost-button emergency-button" id="cancelBtn" disabled>Emergency Stop</button>
         <button class="ghost-button" id="openResultBtn" disabled>Open Result</button>
-        <button class="ghost-button" id="preflightToolbarBtn">Preflight</button>
         <div class="toolbar-spacer"></div>
         <span class="elapsed-pill" id="elapsedPill">00:00:00</span>
       </div>
@@ -199,8 +189,6 @@ app.innerHTML = `
           <label class="retry">Timeout <input id="timeoutInput" type="number" min="60" /></label>
         </section>
       </div>
-
-      <section class="preflight-panel" id="preflightPanel"></section>
 
       <section class="flow-map expanded" id="flowMapSection">
         <div class="accordion-header" id="flowMapHeader">
@@ -367,8 +355,7 @@ const els = {
   runBtn: document.querySelector("#runBtn"),
   cancelBtn: document.querySelector("#cancelBtn"),
   openResultBtn: document.querySelector("#openResultBtn"),
-  preflightToolbarBtn: document.querySelector("#preflightToolbarBtn"),
-  preflightPanel: document.querySelector("#preflightPanel"),
+  preflightStatusBtn: document.querySelector("#preflightStatusBtn"),
   selectedStrip: document.querySelector("#selectedStrip"),
   modePill: document.querySelector("#modePill"),
   selectedPill: document.querySelector("#selectedPill"),
@@ -510,7 +497,23 @@ els.browseBtn.addEventListener("click", browseRoot);
 els.runBtn.addEventListener("click", runSelected);
 els.cancelBtn.addEventListener("click", cancelRun);
 els.openResultBtn.addEventListener("click", openResult);
-els.preflightToolbarBtn.addEventListener("click", () => runPreflight(false));
+if (els.preflightStatusBtn) {
+  els.preflightStatusBtn.addEventListener("click", async () => {
+    state.runningPreflight = true;
+    renderPreflight();
+    const lines = await runPreflight(false);
+    state.runningPreflight = false;
+    renderPreflight();
+    const groups = preflightGroups();
+    const missing = groups.reduce((sum, g) => sum + g.bad.length, 0);
+    if (missing > 0) {
+      const issues = groups.flatMap((g) => g.bad.map((b) => `[${g.name}] ${b}`));
+      showInfoModal("Preflight Check Issues", "Some tools or environment requirements are missing.", issues, "warning");
+    } else {
+      showInfoModal("Preflight System Ready", `All required tools and test suites are verified in ${state.autoRoot || "AUTO"}.`, lines, "info");
+    }
+  });
+}
 els.resultPill.addEventListener("click", openResult);
 els.flowResizer.addEventListener("pointerdown", startFlowResize);
   const flowMapHeader = document.getElementById("flowMapHeader");
@@ -612,6 +615,8 @@ subscribe("gba-laundry-result-update", (event) => {
       ((row.originalId || row.id) === payload.id || row.id?.endsWith(`:${payload.id}`)) ? updateLaundryRow(row, payload) : row);
   }
   renderFlowMap();
+  renderSuiteStatus();
+  renderMetrics();
 });
 subscribe("gba-run-finished", (event) => {
   const payload = event.payload || {};
@@ -1029,6 +1034,11 @@ function renderDevices() {
   renderSelectedStrip();
 }
 
+function autoSelectLaundryRows() {
+  if (!state.laundryResults.length) return;
+  state.selectedLaundryResults = new Set(state.laundryResults.map((row) => row.id));
+}
+
 function renderTestArea() {
   const runningModes = new Set(
     state.running
@@ -1036,72 +1046,133 @@ function renderTestArea() {
       : []
   );
 
-  els.testArea.innerHTML = TEST_MODES.map((mode) => {
+  const laundryModes = TEST_MODES.filter((m) => m.laundry);
+  const directModes = TEST_MODES.filter((m) => !m.laundry);
+
+  const renderModeBtn = (mode, isLaundry = false) => {
     const isRunning = state.running && runningModes.has(mode.id);
     const isSelected = state.selectedMode === mode.id && !isRunning;
     return `
-      <button class="mode-card ${isSelected ? "selected" : ""} ${isRunning ? "running" : ""}" data-mode="${escapeHtml(mode.id)}">
+      <button class="mode-card ${isLaundry ? "mode-laundry" : "mode-direct"} ${isSelected ? "selected" : ""} ${isRunning ? "running" : ""}" data-mode="${escapeHtml(mode.id)}">
         <strong>${escapeHtml(mode.name)}</strong>
       </button>
     `;
-  }).join("");
+  };
+
+  els.testArea.innerHTML = `
+    <div class="mode-segmented-group laundry-group">
+      <div class="mode-group-header">
+        <span class="mode-group-icon">🧺</span>
+        <span class="mode-group-title">Laundry Suite</span>
+      </div>
+      <div class="mode-group-pills">
+        ${laundryModes.map((m) => renderModeBtn(m, true)).join("")}
+      </div>
+    </div>
+    <div class="mode-segmented-group direct-group">
+      <div class="mode-group-header">
+        <span class="mode-group-icon">⚡</span>
+        <span class="mode-group-title">Direct Suites</span>
+      </div>
+      <div class="mode-group-pills">
+        ${directModes.map((m) => renderModeBtn(m, false)).join("")}
+      </div>
+    </div>
+  `;
 
   els.testArea.querySelectorAll(".mode-card").forEach((card) => {
     card.addEventListener("click", async () => {
-      state.selectedMode = card.dataset.mode;
-      if (isLaundryMode(state.selectedMode)) {
+      const modeId = card.dataset.mode;
+      const isSwitchingLaundry = isLaundryMode(modeId);
+      state.selectedMode = modeId;
+      if (isSwitchingLaundry) {
         await chooseLaundryZip();
       }
       renderTestArea();
       renderFlowMap();
+      render();
     });
   });
 }
 
 function renderPreflight() {
-  if (!state.preflightLines.length) {
-    els.preflightPanel.innerHTML = `<div class="preflight-empty">Preflight has not run.</div>`;
-    if (els.preflightPill) els.preflightPill.textContent = "Preflight -";
+  const btn = els.preflightStatusBtn;
+  if (!btn) return;
+
+  const badge = btn.querySelector("#preflightIssueBadge");
+
+  if (state.runningPreflight) {
+    btn.className = "preflight-status-btn checking";
+    btn.title = "Running preflight diagnostic check...";
+    if (badge) badge.style.display = "none";
     return;
   }
+
+  if (!state.preflightLines.length) {
+    btn.className = "preflight-status-btn standby";
+    btn.title = "Preflight has not run (Click to test)";
+    if (badge) badge.style.display = "none";
+    return;
+  }
+
   const groups = preflightGroups();
   const missing = groups.reduce((sum, group) => sum + group.bad.length, 0);
-  if (els.preflightPill) {
-    els.preflightPill.textContent = missing ? `Preflight ${missing}` : "Preflight OK";
-    els.preflightPill.className = `toolbar-pill ${missing ? "bad" : "ok"}`;
+
+  if (missing > 0) {
+    btn.className = "preflight-status-btn bad";
+    btn.title = `Preflight: ${missing} issue(s) detected (Click to inspect)`;
+    if (badge) {
+      badge.textContent = missing;
+      badge.style.display = "flex";
+    }
+  } else {
+    btn.className = "preflight-status-btn ok";
+    btn.title = "Preflight OK: All tools & suites ready (Click to re-run / inspect)";
+    if (badge) {
+      badge.style.display = "none";
+    }
   }
-  els.preflightPanel.innerHTML = `
-    <div class="preflight-head">
-      <strong class="${missing ? "fail" : "pass"}">${missing ? `${missing} issue(s)` : "Ready"}</strong>
-      <span>${escapeHtml(state.autoRoot || "-")}</span>
-    </div>
-    <div class="preflight-list">
-      ${groups.map((group) => `
-        <button class="${group.bad.length ? "bad" : "ok"}" title="${escapeHtml([...group.bad, ...group.ok].join("\n"))}">
-          <b>${escapeHtml(group.name)}</b>
-          <span>${group.bad.length ? `${group.bad.length} issue` : `${group.ok.length} OK`}</span>
-        </button>
-      `).join("")}
-    </div>
-  `;
 }
 
 function renderSelectedStrip() {
   const selectedDevices = state.devices.filter((device) => state.selected.has(device.serial));
   const models = [...new Set(selectedDevices.map(modelKey))];
-  const kinds = [
-    selectedDevices.some((device) => !device.is_userdebug) ? "USER" : "",
-    selectedDevices.some((device) => device.is_userdebug) ? "USERDEBUG" : "",
-  ].filter(Boolean).join("+") || "-";
+  const hasUser = selectedDevices.some((d) => !d.is_userdebug);
+  const hasUd = selectedDevices.some((d) => d.is_userdebug);
+  const typeText = hasUser && hasUd ? "USER+UD" : hasUd ? "USERDEBUG" : hasUser ? "USER" : "-";
   const selectedText = `${selectedDevices.length} selected`;
+
   if (els.modePill) els.modePill.textContent = state.selectedMode;
   if (els.selectedPill) els.selectedPill.textContent = selectedText;
+
+  let zipHtml = `<span class="zip-meta-pill" style="cursor: pointer;" title="Click to pick Laundry ZIP"><b>Zip</b> <u>None</u></span>`;
+  if (state.scanningLaundry) {
+    const { current = 1, total = 1 } = state.scanProgress || {};
+    zipHtml = `<span class="zip-meta-pill" style="color: var(--cyan);"><b>Zip</b> Parsing (${current}/${total})...</span>`;
+  } else if (state.laundrySources.length > 0) {
+    const zipSummary = state.laundrySources
+      .map((source) => {
+        const model = source.models[0] || fileName(source.path).replace(/\.zip$/i, "").slice(0, 10);
+        const plan = detectZipPlanKind(source.rows);
+        return `${model} [${plan}]`;
+      })
+      .join(" · ");
+    const fullNames = state.laundrySources.map((s) => fileName(s.path)).join("\n");
+    zipHtml = `<span class="zip-meta-pill" style="cursor: pointer;" title="${escapeHtml(fullNames)}\n(Click to change)"><b>Zip</b> <u style="text-decoration-style: dotted;">${escapeHtml(zipSummary)}</u></span>`;
+  }
+
   els.selectedStrip.innerHTML = `
-    <span><b>Selected</b> ${selectedText}</span>
+    <span><b>Selected</b> ${selectedDevices.length} (${typeText})</span>
     <span><b>Model</b> ${escapeHtml(models.join(", ") || "-")}</span>
-    <span><b>Type</b> ${escapeHtml(kinds)}</span>
-    <span><b>Zip</b> ${escapeHtml(state.laundrySources.map((source) => fileName(source.path)).join(", ") || "-")}</span>
+    ${zipHtml}
   `;
+
+  const zipPill = els.selectedStrip.querySelector(".zip-meta-pill");
+  if (zipPill) {
+    zipPill.addEventListener("click", async () => {
+      if (!state.scanningLaundry) await chooseLaundryZip();
+    });
+  }
 }
 
 function formatLogLineHtml(line) {
@@ -1347,14 +1418,49 @@ function renderFlowMap() {
 
   let contentHtml = "";
   if (state.runTableTab === "preview") {
-    if (state.laundryResults.length) {
+    if (state.scanningLaundry) {
+      const { current = 1, total = 1, currentFile = "Reading zip..." } = state.scanProgress || {};
+      const completedSourcesHtml = state.laundrySources.map((source) => {
+        const rows = source.rows.map((row) => ({ ...row, locked: false, running: false }));
+        const sourceSelected = rows.filter((row) => state.selectedLaundryResults.has(row.id)).length;
+        const model = source.models.join(", ") || "Auto-detect";
+        const plan = detectZipPlanKind(rows);
+        return renderLaundryTableCard({
+          title: `Laundry · ${model} · [${plan}]`,
+          subtitle: `${fileName(source.path)} (${sourceSelected}/${rows.length} selected)`,
+          rows,
+        });
+      }).join("");
+
+      contentHtml = `
+        <div class="laundry-scan-progress-banner">
+          <div class="scan-spinner"></div>
+          <div class="scan-text">
+            <strong>Parsing Laundry ZIP (${current}/${total})</strong>
+            <span>${escapeHtml(currentFile)} · Reading results & subplans...</span>
+          </div>
+        </div>
+        <div class="laundry-table-stack">
+          ${completedSourcesHtml}
+          <div class="laundry-table-card skeleton-card">
+            <div class="skeleton-header shimmer"></div>
+            <div class="skeleton-body">
+              <div class="skeleton-row shimmer"></div>
+              <div class="skeleton-row shimmer"></div>
+              <div class="skeleton-row shimmer"></div>
+            </div>
+          </div>
+        </div>
+      `;
+    } else if (state.laundryResults.length) {
       contentHtml = `<div class="laundry-table-stack">${state.laundrySources.map((source) => {
         const rows = source.rows.map((row) => ({ ...row, locked: false, running: false }));
         const sourceSelected = rows.filter((row) => state.selectedLaundryResults.has(row.id)).length;
-        const model = source.models.join(", ") || "Model auto-detect";
+        const model = source.models.join(", ") || "Auto-detect";
+        const plan = detectZipPlanKind(rows);
         return renderLaundryTableCard({
-          title: `${state.selectedMode} · ${model}`,
-          subtitle: `${sourceSelected}/${rows.length} selected · ${fileName(source.path)}`,
+          title: `Laundry · ${model} · [${plan}]`,
+          subtitle: `${fileName(source.path)} (${sourceSelected}/${rows.length} selected)`,
           rows,
         });
       }).join("")}</div>`;
@@ -1416,12 +1522,14 @@ function renderLaundryTableCards(rows) {
     byRun.get(row.runId).push(row);
   });
   return [...byRun.entries()].map(([runId, runRows]) => {
-    const flow = state.flows.get(runId) || { mode: runRows[0]?.mode || "Laundry Run", devices: runRows[0]?.devices || "" };
+    const flow = state.flows.get(runId) || { mode: runRows[0]?.mode || "Laundry", devices: runRows[0]?.devices || "" };
     const deviceModel = getDeviceModelsForFlow(flow);
     const active = state.activeRuns.has(runId);
+    const runPlans = sourceTestplansSummary(runRows);
+    const planLabel = runPlans.length ? runPlans.join(" · ") : (flow.mode || "Laundry");
     return renderLaundryTableCard({
-      title: `${flow.mode || "Laundry Run"} Model ${deviceModel}`,
-      subtitle: `${active ? "Running" : "Done"} · ${flow.devices || "-"} · ${flow.flow || ""}`,
+      title: `${flow.mode || "Laundry"} · ${deviceModel} · [${planLabel}]`,
+      subtitle: `${active ? "Running" : "Done"} · ${flow.devices || "-"} · ${flow.flow || planLabel}`,
       rows: runRows,
       locked: true,
       active,
@@ -1534,6 +1642,41 @@ function updateLaundryRow(row, payload) {
   };
 }
 
+function getSuiteSummaryForStatus(status) {
+  const runId = status.run_id || "legacy";
+  const suiteName = String(status.suite || "").trim().toUpperCase();
+
+  const matchingRows = [...state.lockedLaundryResults.values()].filter((row) => {
+    const rowRunId = row.runId || "legacy";
+    if (rowRunId !== runId) return false;
+    const rowSuite = String(row.suite || "").trim().toUpperCase();
+    const rowTestcase = String(row.testcase || "").trim().toUpperCase();
+    return rowSuite === suiteName || (!rowSuite && rowTestcase.startsWith(suiteName));
+  });
+
+  if (matchingRows.length > 0) {
+    return {
+      total: matchingRows.reduce((sum, r) => sum + (Number(r.total) || 0), 0),
+      passed: matchingRows.reduce((sum, r) => sum + (Number(r.passed) || 0), 0),
+      failed: matchingRows.reduce((sum, r) => sum + (Number(r.failed) || 0), 0),
+      found: true,
+    };
+  }
+
+  const key = `${runId}:${status.suite}:${status.devices || ""}`;
+  const summary = state.summaries.get(key);
+  if (summary) {
+    return {
+      total: Number(summary.total || 0),
+      passed: Number(summary.passed || 0),
+      failed: Number(summary.failed || 0),
+      found: true,
+    };
+  }
+
+  return { total: 0, passed: 0, failed: 0, found: false };
+}
+
 function renderSuiteStatus() {
   const statuses = [...state.suiteStatuses.values()];
   let progressStatuses = [];
@@ -1576,21 +1719,19 @@ function renderSuiteStatus() {
     let passedTestcases = 0;
     let failedTestcases = 0;
     sortedStatuses.forEach((status) => {
-      const key = `${status.run_id || "legacy"}:${status.suite}:${status.devices || ""}`;
-      const summary = state.summaries.get(key);
-      if (summary) {
-        totalTestcases += Number(summary.total || 0);
-        passedTestcases += Number(summary.passed || 0);
-        failedTestcases += Number(summary.failed || 0);
+      const summary = getSuiteSummaryForStatus(status);
+      if (summary.found || summary.total > 0) {
+        totalTestcases += summary.total;
+        passedTestcases += summary.passed;
+        failedTestcases += summary.failed;
       }
     });
     const testedTestcases = passedTestcases + failedTestcases;
 
     const rows = sortedStatuses.map((status) => {
-      const key = `${status.run_id || "legacy"}:${status.suite}:${status.devices || ""}`;
-      const summary = state.summaries.get(key);
-      const failed = summary?.failed ?? "-";
-      const passed = summary?.passed ?? "-";
+      const summary = getSuiteSummaryForStatus(status);
+      const failed = summary.found ? summary.failed : "-";
+      const passed = summary.found ? summary.passed : "-";
       return `
         <div class="suite-row status-row-${statusClass(status.status)}">
           <div>
@@ -1659,11 +1800,36 @@ function compareSuiteStatuses(a, b) {
 
 function renderMetrics() {
   const statuses = [...state.suiteStatuses.values()];
-  const summaries = [...state.summaries.values()];
   const active = statuses.filter((s) => !["Test Done", "Cancelled", "Failed", "Timeout"].includes(s.status)).length;
   const completed = statuses.filter((s) => ["Test Done", "Failed", "Timeout"].includes(s.status)).length;
-  const passed = summaries.reduce((sum, s) => sum + Number(s.passed || 0), 0);
-  const failed = summaries.reduce((sum, s) => sum + Number(s.failed || 0), 0);
+
+  let passed = 0;
+  let failed = 0;
+
+  const processedRunSuites = new Set();
+  for (const status of statuses) {
+    const runId = status.run_id || "legacy";
+    const suiteName = String(status.suite || "").trim().toUpperCase();
+    const runSuiteKey = `${runId}:${suiteName}`;
+    if (processedRunSuites.has(runSuiteKey)) continue;
+    processedRunSuites.add(runSuiteKey);
+
+    const summary = getSuiteSummaryForStatus(status);
+    passed += summary.passed;
+    failed += summary.failed;
+  }
+
+  for (const [key, s] of state.summaries.entries()) {
+    const parts = key.split(":");
+    const runId = parts[0] || "legacy";
+    const suiteName = (parts[1] || "").trim().toUpperCase();
+    const runSuiteKey = `${runId}:${suiteName}`;
+    if (!processedRunSuites.has(runSuiteKey)) {
+      passed += Number(s.passed || 0);
+      failed += Number(s.failed || 0);
+    }
+  }
+
   els.activeMetric.textContent = String(active);
   els.completedMetric.textContent = String(completed);
   els.passedMetric.textContent = String(passed);
@@ -1848,7 +2014,8 @@ function shortFingerprint(value) {
 }
 
 function isLaundryMode(modeName) {
-  return modeName === "Laundry SMR" || modeName === "Laundry Normal" || modeName === "Laundry SKU";
+  const name = String(modeName || "").trim();
+  return name === "Laundry" || name === "Laundry SMR" || name === "Laundry Normal" || name === "Laundry SKU" || name.toLowerCase().startsWith("laundry");
 }
 
 function closeFilePicker(value) {
@@ -1917,12 +2084,25 @@ function openSnapshot(serial) {
 }
 
 async function chooseLaundryZip() {
-  const selected = isTauri
-    ? await open({ defaultPath: DEFAULT_CUCIAN_DIR, directory: false, multiple: true, filters: [{ name: "Laundry zip", extensions: ["zip"] }] })
-    : await openFilePicker({ mode: "zip", multiple: true, initial: DEFAULT_CUCIAN_DIR });
-  const paths = isTauri
-    ? (Array.isArray(selected) ? selected : [selected]).map(normalizeDialogPath).filter(Boolean)
-    : selected;
+  let selected = null;
+  try {
+    if (isTauri) {
+      selected = await open({
+        defaultPath: DEFAULT_CUCIAN_DIR,
+        directory: false,
+        multiple: true,
+        filters: [{ name: "Laundry zip", extensions: ["zip"] }]
+      });
+    } else {
+      selected = await openFilePicker({ mode: "zip", multiple: true, initial: DEFAULT_CUCIAN_DIR });
+    }
+  } catch (err) {
+    appendLog(`[runner] Native dialog fallback to in-app picker: ${err}`);
+    selected = await openFilePicker({ mode: "zip", multiple: true, initial: DEFAULT_CUCIAN_DIR });
+  }
+  const paths = isTauri && Array.isArray(selected)
+    ? selected.map(normalizeDialogPath).filter(Boolean)
+    : (isTauri && selected ? [normalizeDialogPath(selected)].filter(Boolean) : (Array.isArray(selected) ? selected : []));
   if (!paths.length) return;
 
   state.laundrySources = [];
@@ -1930,8 +2110,17 @@ async function chooseLaundryZip() {
   state.selectedLaundryResults = new Set();
   state.laundryWarnings = [];
   state.manualSelection = false;
+  state.scanningLaundry = true;
+  state.runTableTab = "preview";
+  state.scanProgress = { current: 1, total: paths.length, currentFile: fileName(paths[0]) };
+  render();
 
   for (const [index, path] of paths.entries()) {
+    state.scanProgress = { current: index + 1, total: paths.length, currentFile: fileName(path) };
+    renderFlowMap();
+    renderSelectedStrip();
+    await new Promise((resolve) => setTimeout(resolve, 30));
+
     try {
       const analyzed = await invoke("analyze_laundry_zip", { zipPath: path });
       const rows = (Array.isArray(analyzed) ? analyzed : []).filter((row) => !isCtsVerifierRow(row));
@@ -1947,8 +2136,13 @@ async function chooseLaundryZip() {
       source.models = laundryPreviewModelsForSource(source, state.devices);
       state.laundrySources.push(source);
       state.laundryResults.push(...sourceRows);
-      sourceRows.forEach((row) => state.selectedLaundryResults.add(row.id));
-      appendLog(`[runner] Laundry zip scanned: ${fileName(path)} (${sourceRows.length} result(s), model ${source.models.join(", ") || "auto"}).`);
+      const plan = detectZipPlanKind(sourceRows);
+      appendLog(`[runner] Laundry zip scanned: ${fileName(path)} (${sourceRows.length} result(s), model ${source.models.join(", ") || "auto"}, plan: ${plan}).`);
+
+      selectLaundryModelFromResults();
+      renderFlowMap();
+      renderSelectedStrip();
+
       try {
         const autoRoot = state.autoRoot || await invoke("default_auto_root");
         const warnings = await invoke("check_laundry_mismatches", { autoRoot, zipPath: path });
@@ -1962,6 +2156,8 @@ async function chooseLaundryZip() {
     }
   }
 
+  state.scanningLaundry = false;
+  state.scanProgress = null;
   state.laundryZipPath = state.laundrySources[0]?.path || "";
   state.runTableTab = "preview";
   if (!state.laundrySources.length) {
@@ -1973,6 +2169,7 @@ async function chooseLaundryZip() {
     renderPreflight();
     showInfoModal("Mismatched Tools Warning", "Some required tools are mismatched or missing.", state.laundryWarnings, "warning");
   }
+  autoSelectLaundryRows();
   selectLaundryModelFromResults();
   renderTestArea();
   renderFlowMap();
@@ -2072,19 +2269,22 @@ async function runSelected() {
     const groupSerials = groupDevices.map((device) => device.serial);
     const groupUserDevices = groupDevices.filter((device) => !device.is_userdebug).map((device) => device.serial);
     const groupUserdebugDevices = groupDevices.filter((device) => device.is_userdebug).map((device) => device.serial);
-    const runId = `${runMode.replaceAll(/\W+/g, "_")}_${Date.now()}_${index + 1}`;
-    const flowTitle = `${runFlow} | ${group.kind} | ${shortFingerprint(group.fingerprint)}`;
+    const plan = runPlans[index];
+    const shardRows = isLaundryMode(runMode)
+      ? state.laundryResults.filter((row) => plan.selectedUiIds.includes(row.id))
+      : [];
+    const planLabel = isLaundryMode(runMode) ? detectZipPlanKind(shardRows) : runFlow;
+    const flowTitle = `${planLabel} | ${group.kind} | ${shortFingerprint(group.fingerprint)}`;
 
     const groupModels = [...new Set(groupDevices.map(d => d.model || "Unknown"))].join(", ");
     state.activeRuns.add(runId);
     state.runDevices.set(runId, groupSerials);
     state.flows.set(runId, {
-      mode: runMode,
+      mode: isLaundryMode(runMode) ? "Laundry" : runMode,
       flow: flowTitle,
       devices: groupSerials.join(","),
       model: groupModels || "Unknown",
     });
-    const plan = runPlans[index];
     if (isLaundryMode(runMode)) lockLaundryRowsForRun(runId, runMode, groupSerials, plan.selectedUiIds);
     createRunLogFlow(runId, runMode, groupDevices);
     appendLog(`[runner] Starting shard ${index + 1}/${groups.length}: ${group.kind} fingerprint=${shortFingerprint(group.fingerprint)} devices=${groupSerials.join(",")}`);
@@ -2338,15 +2538,11 @@ function validateRun(mode, userDevices, userdebugDevices) {
   const busySelected = state.devices.filter((device) => state.selected.has(device.serial) && device.busy);
   if (busySelected.length) return `Device busy: ${busySelected.map((device) => device.serial).join(", ")}`;
   if (mode.needs === "user" && userDevices.length === 0) return `${mode.name} needs at least one non-userdebug device.`;
-  if ((mode.id === "Laundry Normal" || mode.id === "Laundry SKU") && userdebugDevices.length) {
-    return `${mode.name} hanya boleh menggunakan device USER.`;
-  }
-  if (mode.needs === "userdebug" && userdebugDevices.length === 0) return `${mode.name} needs at least one userdebug device.`;
-  if (mode.id === "Laundry SMR") {
-    const laundryValidation = validateLaundrySmrSelection();
-    if (laundryValidation) return laundryValidation;
-  }
   if (isLaundryMode(mode.id)) {
+    const selectedRows = state.laundryResults.filter((row) => !state.selectedLaundryResults.size || state.selectedLaundryResults.has(row.id));
+    const needs = laundryNeeds(selectedRows);
+    if (needs.user && userDevices.length === 0) return `${mode.name} needs at least one USER device.`;
+    if (needs.userdebug && userdebugDevices.length === 0) return `${mode.name} needs at least one userdebug device for STS.`;
     const modelValidation = validateLaundryModelSelection();
     if (modelValidation) return modelValidation;
   }
@@ -2358,24 +2554,53 @@ function validateRun(mode, userDevices, userdebugDevices) {
 function selectLaundryModelFromResults() {
   if (!isLaundryMode(state.selectedMode) || !state.devices.length) return false;
   const readyDevices = state.devices.filter((device) => device.state === "device" && !device.busy);
-  const selectedRows = state.laundryResults.filter((row) => !state.selectedLaundryResults.size || state.selectedLaundryResults.has(row.id));
-  if (!selectedRows.length) return false;
-  const needs = laundryNeeds(selectedRows);
-  const hintedModels = [...new Set([
-    ...state.laundrySources.flatMap((source) => source.models),
-    ...laundryPreviewModels(selectedRows, readyDevices),
-  ])];
-  const runnableModels = hintedModels.filter((model) => {
-    const sameModel = readyDevices.filter((device) => modelKey(device) === model);
-    return (!needs.user || sameModel.some((device) => !device.is_userdebug)) &&
-      (!needs.userdebug || sameModel.some((device) => device.is_userdebug));
-  });
-  if (runnableModels.length) {
-    const serials = readyDevices
-      .filter((device) => runnableModels.includes(modelKey(device)))
-      .map((device) => device.serial);
-    state.selected = new Set(serials);
-    appendLog(`[runner] Auto-selected ${serials.length} device(s) for model(s): ${runnableModels.join(", ")}.`);
+  if (!readyDevices.length) return false;
+
+  const selectedSerials = new Set();
+  const selectedModels = new Set();
+
+  for (const source of state.laundrySources) {
+    const sourceRows = state.laundryResults.filter(
+      (row) => (row.sourceId === source.id || row.sourcePath === source.path) &&
+               (!state.selectedLaundryResults.size || state.selectedLaundryResults.has(row.id))
+    );
+    const rowsToCheck = sourceRows.length > 0 ? sourceRows : source.rows;
+    const sourceNeeds = laundryNeeds(rowsToCheck);
+    const sourceModels = source.models.length > 0 ? source.models : laundryPreviewModels(rowsToCheck, readyDevices);
+
+    for (const model of sourceModels) {
+      const sameModelDevices = readyDevices.filter((device) => modelKey(device) === model);
+      if (!sameModelDevices.length) continue;
+
+      let matchedDevices = sameModelDevices;
+      if (sourceNeeds.user && !sourceNeeds.userdebug) {
+        const userOnly = sameModelDevices.filter((d) => !d.is_userdebug);
+        if (userOnly.length > 0) matchedDevices = userOnly;
+      } else if (sourceNeeds.userdebug && !sourceNeeds.user) {
+        const udOnly = sameModelDevices.filter((d) => d.is_userdebug);
+        if (udOnly.length > 0) matchedDevices = udOnly;
+      }
+
+      matchedDevices.forEach((device) => selectedSerials.add(device.serial));
+      selectedModels.add(model);
+    }
+  }
+
+  if (!selectedSerials.size) {
+    const hintedModels = [...new Set(state.laundrySources.flatMap((source) => source.models))];
+    for (const model of hintedModels) {
+      readyDevices
+        .filter((device) => modelKey(device) === model)
+        .forEach((device) => {
+          selectedSerials.add(device.serial);
+          selectedModels.add(model);
+        });
+    }
+  }
+
+  if (selectedSerials.size > 0) {
+    state.selected = selectedSerials;
+    appendLog(`[runner] Auto-selected ${selectedSerials.size} device(s) for model(s): ${[...selectedModels].join(", ")}.`);
     return true;
   }
   return false;
@@ -2393,6 +2618,13 @@ function laundryPreviewHint(rows) {
 }
 
 function laundryPreviewModelsForSource(source, devices = state.devices) {
+  const parsedModels = [...new Set(
+    source.rows.map((row) => row.model && modelKey({ model: row.model })).filter((m) => m && m !== "UNKNOWN_MODEL")
+  )];
+  if (parsedModels.length > 0) {
+    return parsedModels;
+  }
+
   const hint = `${source.path} ${source.rows.map((row) => [
     row.id,
     row.originalId,
@@ -2404,6 +2636,25 @@ function laundryPreviewModelsForSource(source, devices = state.devices) {
   ].filter(Boolean).join(" ")).join(" ")}`.toUpperCase();
   return [...new Set(devices.map(modelKey))]
     .filter((model) => model !== "UNKNOWN_MODEL" && modelMatchesPreview(model, hint));
+}
+
+function detectZipPlanKind(rows) {
+  const rowList = Array.isArray(rows) ? rows : [];
+  if (!rowList.length) return "Normal";
+
+  const allSubs = rowList
+    .map((r) => `${r.suite || ""} ${r.subtestcases || ""} ${r.testcase || ""}`)
+    .join(" ")
+    .toLowerCase();
+
+  if (allSubs.includes("variant") || allSubs.includes("sku")) return "SKU";
+  if (allSubs.includes("smr") || allSubs.includes("gtsmr") || allSubs.includes("sts")) return "SMR";
+  if (rowList.every((r) => String(r.suite || "").toUpperCase() === "STS")) return "STS";
+  return "Normal";
+}
+
+function sourceTestplansSummary(rows) {
+  return [detectZipPlanKind(rows)];
 }
 
 function laundrySourceForModel(model) {
@@ -2420,6 +2671,13 @@ function modelMatchesPreview(model, hint) {
 }
 
 function laundryPreviewModels(rows, devices = state.devices) {
+  const parsedModels = [...new Set(
+    rows.map((row) => row.model && modelKey({ model: row.model })).filter((m) => m && m !== "UNKNOWN_MODEL")
+  )];
+  if (parsedModels.length > 0) {
+    return parsedModels;
+  }
+
   const hint = laundryPreviewHint(rows);
   return [...new Set(devices.map(modelKey))]
     .filter((model) => model !== "UNKNOWN_MODEL" && modelMatchesPreview(model, hint));
@@ -2456,38 +2714,6 @@ function laundryNeeds(rows) {
   return { user, userdebug };
 }
 
-function validateLaundrySmrSelection() {
-  const selectedDevices = state.devices.filter((device) => state.selected.has(device.serial));
-  const hasUser = selectedDevices.some((device) => !device.is_userdebug);
-  const hasUserdebug = selectedDevices.some((device) => device.is_userdebug);
-  
-  if (state.selectedLaundryResults && state.selectedLaundryResults.size > 0) {
-    const selectedRows = state.laundryResults.filter(row => state.selectedLaundryResults.has(row.id));
-    const hasCtsOrGts = selectedRows.some(row => {
-      const t = (row.testcase || "").toUpperCase();
-      return t.includes("CTS") || t.includes("GTS") || t.includes("COMPATIBILITY") || t.includes("GOOGLE");
-    });
-    const hasSts = selectedRows.some(row => {
-      const t = (row.testcase || "").toUpperCase();
-      return t.includes("STS") || t.includes("SECURITY");
-    });
-    
-    if (hasCtsOrGts && hasSts) {
-      if (!hasUser || !hasUserdebug) return "Laundry SMR needs selected USER and USERDEBUG device cards.";
-    } else if (hasCtsOrGts) {
-      if (!hasUser) return "Laundry SMR needs selected USER device card for CTS/GTS.";
-    } else if (hasSts) {
-      if (!hasUserdebug) return "Laundry SMR needs selected USERDEBUG device card for STS.";
-    } else {
-      if (!hasUser && !hasUserdebug) return "Laundry SMR needs at least one device.";
-    }
-  } else {
-    if (!hasUser && !hasUserdebug) return "Laundry SMR needs at least one device.";
-  }
-
-  // Multiple models are valid: runSelected shards them and assigns each ZIP per model.
-  return "";
-}
 
 function appendLog(line, runId = null, timestamp = null, persist = true) {
   const text = redact(String(line || "")).replaceAll("[runner]", "[AI Worker]");
@@ -2661,6 +2887,14 @@ function createBootLogFlow() {
 }
 
 function appendRunSummaryToLog(runId) {
+  const matchingRows = [...state.lockedLaundryResults.values()].filter((row) => (row.runId || "legacy") === runId);
+  if (matchingRows.length > 0) {
+    const total = matchingRows.reduce((sum, item) => sum + Number(item.total || 0), 0);
+    const passed = matchingRows.reduce((sum, item) => sum + Number(item.passed || 0), 0);
+    const failed = matchingRows.reduce((sum, item) => sum + Number(item.failed || 0), 0);
+    appendRunnerLogForRun(runId, `[AI Worker] Flow summary: suites=${matchingRows.length} total=${total} pass=${passed} fail=${failed}`);
+    return;
+  }
   const summaries = [...state.summaries.values()].filter((summary) => (summary.run_id || "legacy") === runId);
   if (!summaries.length) return;
   const total = summaries.reduce((sum, item) => sum + Number(item.total || 0), 0);
