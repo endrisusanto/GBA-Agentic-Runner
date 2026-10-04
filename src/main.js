@@ -182,14 +182,6 @@ app.innerHTML = `
 
       <section class="test-area" id="testArea"></section>
 
-      <div class="workspace-meta-bar">
-        <section class="selected-strip" id="selectedStrip"></section>
-        <section class="run-options">
-          <label class="retry">Retry <input id="retryInput" type="number" min="0" max="99" /></label>
-          <label class="retry">Timeout <input id="timeoutInput" type="number" min="60" /></label>
-        </section>
-      </div>
-
       <section class="flow-map expanded" id="flowMapSection">
         <div class="accordion-header" id="flowMapHeader">
           <div class="accordion-header-left">
@@ -275,6 +267,16 @@ app.innerHTML = `
             <span>Password</span>
             <input id="wifiPasswordInput" type="password" autocomplete="off" />
           </label>
+          <div style="display: flex; gap: 12px; margin-top: 8px;">
+            <label class="path-field compact" style="flex: 1;">
+              <span>Retry Count</span>
+              <input id="settingsRetryInput" type="number" min="0" max="99" />
+            </label>
+            <label class="path-field compact" style="flex: 1;">
+              <span>Timeout (sec)</span>
+              <input id="settingsTimeoutInput" type="number" min="60" />
+            </label>
+          </div>
         </section>
         <div class="settings-actions">
           <button class="ghost-button" id="preflightBtn">Check</button>
@@ -377,8 +379,8 @@ const els = {
   wifiSsidInput: document.querySelector("#wifiSsidInput"),
   wifiPasswordInput: document.querySelector("#wifiPasswordInput"),
   settingsOutput: document.querySelector("#settingsOutput"),
-  retryInput: document.querySelector("#retryInput"),
-  timeoutInput: document.querySelector("#timeoutInput"),
+  retryInput: document.querySelector("#settingsRetryInput"),
+  timeoutInput: document.querySelector("#settingsTimeoutInput"),
   clearLogBtn: document.querySelector("#clearLogBtn"),
   statusLine: document.querySelector("#statusLine"),
   deviceFooter: document.querySelector("#deviceFooter"),
@@ -441,8 +443,8 @@ if (isTauri && typeof getVersion === "function") {
 setDeviceFooter("Standby");
 setStatusLine("Standby");
 
-els.retryInput.value = state.retryCount;
-els.timeoutInput.value = state.timeoutSecs;
+if (els.retryInput) els.retryInput.value = state.retryCount;
+if (els.timeoutInput) els.timeoutInput.value = state.timeoutSecs;
 
 els.refreshBtn.addEventListener("click", refreshDevices);
 els.resetBusyBtn.addEventListener("click", resetBusyState);
@@ -529,8 +531,8 @@ els.flowResizer.addEventListener("pointerdown", startFlowResize);
       toggleSection("runningLogSection");
     });
   }
-els.retryInput.addEventListener("change", saveInlineSettings);
-els.timeoutInput.addEventListener("change", saveInlineSettings);
+if (els.retryInput) els.retryInput.addEventListener("change", saveInlineSettings);
+if (els.timeoutInput) els.timeoutInput.addEventListener("change", saveInlineSettings);
 document.addEventListener("keydown", (event) => {
   if (event.ctrlKey && event.shiftKey && event.key.toLowerCase() === "b") {
     event.preventDefault();
@@ -1144,6 +1146,8 @@ function renderSelectedStrip() {
 
   if (els.modePill) els.modePill.textContent = state.selectedMode;
   if (els.selectedPill) els.selectedPill.textContent = selectedText;
+
+  if (!els.selectedStrip) return;
 
   let zipHtml = `<span class="zip-meta-pill" style="cursor: pointer;" title="Click to pick Laundry ZIP"><b>Zip</b> <u>None</u></span>`;
   if (state.scanningLaundry) {
@@ -1900,7 +1904,7 @@ function toggleAllReadyDevices() {
 }
 
 function shardSelectedDevices(devices, mode) {
-  if (mode?.id === "Laundry SMR") return shardLaundrySmrDevices(devices);
+  if (isLaundryMode(mode?.id)) return shardLaundrySmrDevices(devices);
   if (mode?.id === "SMR") return shardSmrDevices(devices);
   const groups = new Map();
   devices.forEach((device) => {
@@ -1949,12 +1953,10 @@ function shardLaundrySmrDevices(devices) {
     let valid = false;
     if (hasCtsOrGts && hasSts) {
       valid = hasUser && hasUserdebug;
-    } else if (hasCtsOrGts) {
-      valid = hasUser;
     } else if (hasSts) {
       valid = hasUserdebug;
     } else {
-      // ponytail: no row type detected — accept any device combo
+      // CTS, GTS, or general SMR: any device (user or userdebug) of same model can run
       valid = hasUser || hasUserdebug;
     }
 
@@ -2265,14 +2267,32 @@ async function runSelected() {
 
   appendLog(`[runner] ${runMode}: split into ${groups.length} fingerprint shard group(s).`);
   for (const [index, group] of groups.entries()) {
+    const runId = typeof crypto !== "undefined" && crypto.randomUUID ? crypto.randomUUID() : `run_${Date.now()}_${index}`;
     const groupDevices = group.devices;
     const groupSerials = groupDevices.map((device) => device.serial);
-    const groupUserDevices = groupDevices.filter((device) => !device.is_userdebug).map((device) => device.serial);
-    const groupUserdebugDevices = groupDevices.filter((device) => device.is_userdebug).map((device) => device.serial);
     const plan = runPlans[index];
     const shardRows = isLaundryMode(runMode)
       ? state.laundryResults.filter((row) => plan.selectedUiIds.includes(row.id))
       : [];
+    const shardNeeds = laundryNeeds(shardRows);
+
+    let groupUserDevices = [];
+    let groupUserdebugDevices = [];
+
+    if (isLaundryMode(runMode)) {
+      if (shardNeeds.user && shardNeeds.userdebug) {
+        groupUserDevices = groupDevices.filter((device) => !device.is_userdebug).map((device) => device.serial);
+        groupUserdebugDevices = groupDevices.filter((device) => device.is_userdebug).map((device) => device.serial);
+      } else if (shardNeeds.userdebug && !shardNeeds.user) {
+        groupUserdebugDevices = groupDevices.map((device) => device.serial);
+      } else {
+        // When running CTS / GTS in Laundry, all selected devices of this model participate in sharding!
+        groupUserDevices = groupDevices.map((device) => device.serial);
+      }
+    } else {
+      groupUserDevices = groupDevices.filter((device) => !device.is_userdebug).map((device) => device.serial);
+      groupUserdebugDevices = groupDevices.filter((device) => device.is_userdebug).map((device) => device.serial);
+    }
     const planLabel = isLaundryMode(runMode) ? detectZipPlanKind(shardRows) : runFlow;
     const flowTitle = `${planLabel} | ${group.kind} | ${shortFingerprint(group.fingerprint)}`;
 
@@ -2478,6 +2498,8 @@ function openSettings() {
   els.wifiAutoConnectInput.checked = state.wifi.enabled;
   els.wifiSsidInput.value = state.wifi.ssid;
   els.wifiPasswordInput.value = state.wifi.password;
+  if (els.retryInput) els.retryInput.value = state.retryCount;
+  if (els.timeoutInput) els.timeoutInput.value = state.timeoutSecs;
   els.settingsOutput.textContent = "";
   els.settingsModal.classList.remove("hidden");
 }
@@ -2518,10 +2540,14 @@ function saveSettings(close = true) {
   state.wifi.enabled = els.wifiAutoConnectInput.checked;
   state.wifi.ssid = els.wifiSsidInput.value;
   state.wifi.password = els.wifiPasswordInput.value;
+  if (els.retryInput) state.retryCount = Math.max(0, Number(els.retryInput.value || 0));
+  if (els.timeoutInput) state.timeoutSecs = Math.max(60, Number(els.timeoutInput.value || 86400));
   localStorage.setItem("autoRoot", state.autoRoot);
   localStorage.setItem("autoWifiAutoConnect", String(state.wifi.enabled));
   localStorage.setItem("autoWifiSsid", state.wifi.ssid);
   localStorage.setItem("autoWifiPassword", state.wifi.password);
+  localStorage.setItem("autoRetryCount", String(state.retryCount));
+  localStorage.setItem("autoTestTimeout", String(state.timeoutSecs));
   appendLog("[settings] Saved.");
   if (close) closeSettings();
 }
@@ -2573,10 +2599,7 @@ function selectLaundryModelFromResults() {
       if (!sameModelDevices.length) continue;
 
       let matchedDevices = sameModelDevices;
-      if (sourceNeeds.user && !sourceNeeds.userdebug) {
-        const userOnly = sameModelDevices.filter((d) => !d.is_userdebug);
-        if (userOnly.length > 0) matchedDevices = userOnly;
-      } else if (sourceNeeds.userdebug && !sourceNeeds.user) {
+      if (sourceNeeds.userdebug && !sourceNeeds.user) {
         const udOnly = sameModelDevices.filter((d) => d.is_userdebug);
         if (udOnly.length > 0) matchedDevices = udOnly;
       }

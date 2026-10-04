@@ -1,3 +1,42 @@
 {
-  "devices": {}
+  "devices": {
+    "R9WTA0EHHNK": {
+      "serial": "R9WTA0EHHNK",
+      "is_userdebug": false,
+      "test_type": "Laundry",
+      "model": "SM-A146P",
+      "pda": "A146PXXSKEZI2",
+      "run_id": "4e381af5-ff5c-490f-a94c-7fbd7aaae573",
+      "started_at": "1791076980",
+      "result_dir": "/run/media/endri-pro/BINARY_HDD/AUTO/Results/Laundry_SM-A146P_A146PXXSKEZI2_2devs_1791076980_4e381af5-ff5c-490f-a94c-7fbd7aaae573",
+      "current_suite": "CTS",
+      "suite_statuses": {
+        "CTS": {
+          "status": "Running",
+          "elapsed_secs": 36,
+          "zip_file": null
+        }
+      },
+      "session_pid": 166603
+    },
+    "R9WTA0EHKSM": {
+      "serial": "R9WTA0EHKSM",
+      "is_userdebug": true,
+      "test_type": "Laundry",
+      "model": "SM-A146P",
+      "pda": "A146PXXSKEZI2",
+      "run_id": "4e381af5-ff5c-490f-a94c-7fbd7aaae573",
+      "started_at": "1791076980",
+      "result_dir": "/run/media/endri-pro/BINARY_HDD/AUTO/Results/Laundry_SM-A146P_A146PXXSKEZI2_2devs_1791076980_4e381af5-ff5c-490f-a94c-7fbd7aaae573",
+      "current_suite": "STS",
+      "suite_statuses": {
+        "STS": {
+          "status": "Completed",
+          "elapsed_secs": 152,
+          "zip_file": "STS_retry1_SM-A146P_A146PXXSKEZI2_R9WTA0EHKSM_2026.10.04_08.23.08.zip"
+        }
+      },
+      "session_pid": 166603
+    }
+  }
 }

@@ -1560,7 +1560,7 @@ fn run_suite_blocking(app: AppHandle, root: PathBuf, request: RunSuiteRequest, r
 
     match request.test_type.as_str() {
         "Laundry" | "Laundry Normal" | "Laundry SKU" | "Laundry SMR" => {
-            let has_sts = !request.userdebug_devices.is_empty() || request.selected_laundry_rows.iter().any(|r| {
+            let has_sts = request.selected_laundry_rows.iter().any(|r| {
                 let suite = r.get("suite").and_then(|v| v.as_str()).unwrap_or("");
                 let testcase = r.get("testcase").and_then(|v| v.as_str()).unwrap_or("");
                 suite.eq_ignore_ascii_case("sts") || testcase.to_uppercase().contains("STS")
@@ -1863,7 +1863,13 @@ fn run_laundry_normal(
     pda: &str,
     run_id: &str,
 ) -> Result<SuiteOutcome, String> {
-    let devices = &request.user_devices;
+    let mut all_devices = request.user_devices.clone();
+    for d in &request.userdebug_devices {
+        if !all_devices.contains(d) {
+            all_devices.push(d.clone());
+        }
+    }
+    let devices = if !all_devices.is_empty() { &all_devices } else { &request.user_devices };
     let source = prepare_laundry_source(app, request, session_dir)?;
     let is_sku = request.selected_laundry_rows.iter().any(|r| {
         let sub = r.get("subtestcases").and_then(|v| v.as_str()).unwrap_or("");
@@ -1942,14 +1948,25 @@ fn run_laundry_smr(
 ) -> Result<SuiteOutcome, String> {
     let source = prepare_laundry_source(app, request, session_dir)?;
     let has_cts_or_gts = !source.cts_results.is_empty() || !source.gts_results.is_empty();
-    if !request.user_devices.is_empty() && has_cts_or_gts {
-        verify_laundry_suite_tools(app, root, &request.user_devices, &source, &["GTS", "CTS"])?;
+    let mut cts_gts_devices = request.user_devices.clone();
+    if source.sts_results.is_empty() {
+        for d in &request.userdebug_devices {
+            if !cts_gts_devices.contains(d) {
+                cts_gts_devices.push(d.clone());
+            }
+        }
+    } else if cts_gts_devices.is_empty() {
+        cts_gts_devices = request.userdebug_devices.clone();
     }
-    if !request.userdebug_devices.is_empty() {
+
+    if !cts_gts_devices.is_empty() && has_cts_or_gts {
+        verify_laundry_suite_tools(app, root, &cts_gts_devices, &source, &["GTS", "CTS"])?;
+    }
+    if !request.userdebug_devices.is_empty() && !source.sts_results.is_empty() {
         verify_laundry_suite_tools(app, root, &request.userdebug_devices, &source, &["STS"])?;
     }
     let mut codes = Vec::new();
-    let sts_handle = if request.userdebug_devices.is_empty() {
+    let sts_handle = if request.userdebug_devices.is_empty() || source.sts_results.is_empty() {
         None
     } else {
         emit_log(app, "[runner] Laundry (SMR): STS retry starts immediately on userdebug devices.");
@@ -1990,14 +2007,14 @@ fn run_laundry_smr(
         }))
     };
 
-    if !request.user_devices.is_empty() && has_cts_or_gts {
+    if !cts_gts_devices.is_empty() && has_cts_or_gts {
         emit_log(app, "[runner] Laundry (SMR): initial GTS gtsmr run.");
         let deviceinfo = run_laundry_initial_gts(
             app,
             root,
             session_dir,
             log_dir,
-            &request.user_devices,
+            &cts_gts_devices,
             "run gts --subplan gtsmr",
             request.timeout_secs,
             model,
@@ -2013,7 +2030,7 @@ fn run_laundry_smr(
                 session_dir,
                 log_dir,
                 "CTS",
-                &request.user_devices,
+                &cts_gts_devices,
                 &source.extract_root,
                 &source.cts_results,
                 &deviceinfo,
@@ -2031,7 +2048,7 @@ fn run_laundry_smr(
                 session_dir,
                 log_dir,
                 "GTS",
-                &request.user_devices,
+                &cts_gts_devices,
                 &source.extract_root,
                 &source.gts_results,
                 &deviceinfo,
@@ -4151,8 +4168,8 @@ fn validate_laundry_smr_pair(request: &RunSuiteRequest) -> Result<(), String> {
             return Err("Laundry SMR needs selected USER and USERDEBUG devices".to_string());
         }
     } else if has_cts_or_gts {
-        if request.user_devices.is_empty() {
-            return Err("Laundry SMR needs selected USER device for CTS/GTS".to_string());
+        if request.user_devices.is_empty() && request.userdebug_devices.is_empty() {
+            return Err("Laundry SMR needs selected device for CTS/GTS".to_string());
         }
     } else if has_sts {
         if request.userdebug_devices.is_empty() {
